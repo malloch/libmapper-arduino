@@ -20,6 +20,7 @@ make
 * The Arduino library will be compiled to build/Arduino/libmapper
 
 ## Issues
-* The Arduino esp32 framework currently starts the task that's responsible for running void loop() with a stack size of 8192 bytes. In the tests I've done, this is not enough for most libmapper applications. The stack size can be changed in ```
+* The Arduino esp32 framework currently starts the task that's responsible for running void loop() with a stack size of 8192 bytes. In the tests I've done, this is not enough for most libmapper applications. The stack size can be changed in
+```
 hardware/esp32/1.0.4/cores/esp32/main.cpp
 ```

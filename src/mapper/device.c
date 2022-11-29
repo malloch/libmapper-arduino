@@ -4,9 +4,16 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#ifdef _MSC_VER
+#include <windows.h>
+#include <malloc.h>
+#include "time.h"
+#else 
 #include <unistd.h>
-#include <assert.h>
 #include <sys/time.h>
+#endif
+#include <assert.h>
+
 #include <stddef.h>
 
 #include "mapper_internal.h"
@@ -14,14 +21,19 @@
 #include "config.h"
 #include <mapper/mapper.h>
 
-#ifdef HAVE_PTHREAD
+#ifdef HAVE_LIBPTHREAD
 #include <pthread.h>
+static void* device_thread_func(void *data);
+#endif
+
+#ifdef HAVE_WIN32_THREADS
+static unsigned __stdcall device_thread_func(void *data);
 #endif
 
 extern const char* net_msg_strings[NUM_MSG_STRINGS];
 
 /* prototypes */
-void mpr_dev_start_servers(mpr_local_dev dev);
+static void mpr_dev_start_servers(mpr_local_dev dev);
 static void mpr_dev_remove_idmap(mpr_local_dev dev, int group, mpr_id_map rem);
 MPR_INLINE static int _process_outgoing_maps(mpr_local_dev dev);
 
@@ -113,7 +125,10 @@ mpr_dev mpr_dev_new(const char *name_prefix, mpr_graph g)
         return NULL;
     }
 
-    g->net.rtr = (mpr_rtr)calloc(1, sizeof(mpr_rtr_t));
+    if (!g->net.rtr) {
+        g->net.rtr = (mpr_rtr)calloc(1, sizeof(mpr_rtr_t));
+        g->net.rtr->net = &g->net;
+    }
     g->net.rtr->dev = dev;
 
     dev->expr_stack = mpr_expr_stack_new();
@@ -150,13 +165,15 @@ void mpr_dev_free(mpr_dev dev)
     mpr_net_free_msgs(net);
 
     /* remove OSC handlers associated with this device */
-    mpr_net_remove_dev_methods(net, ldev);
+    mpr_net_remove_dev(net, ldev);
 
-    /* also remove any graph handlers registered locally */
-    while (gph->callbacks) {
-        fptr_list cb = gph->callbacks;
-        gph->callbacks = gph->callbacks->next;
-        free(cb);
+    /* remove local graph handlers here so they are not called when child objects are freed */
+    if (!gph->own) {
+        while (gph->callbacks) {
+            fptr_list cb = gph->callbacks;
+            gph->callbacks = gph->callbacks->next;
+            free(cb);
+        }
     }
 
     /* remove subscribers */
@@ -167,6 +184,7 @@ void mpr_dev_free(mpr_dev dev)
         free(sub);
     }
 
+    /* free signals owned by this device */
     list = mpr_dev_get_sigs(dev, MPR_DIR_ANY);
     while (list) {
         mpr_local_sig sig = (mpr_local_sig)*list;
@@ -217,17 +235,6 @@ void mpr_dev_free(mpr_dev dev)
         free(map);
     }
 
-    if (net->rtr) {
-        while (net->rtr->sigs) {
-            mpr_rtr_sig rs = net->rtr->sigs;
-            net->rtr->sigs = net->rtr->sigs->next;
-            free(rs);
-        }
-        free(net->rtr);
-    }
-
-    FUNC_IF(lo_server_free, net->servers[SERVER_UDP]);
-    FUNC_IF(lo_server_free, net->servers[SERVER_TCP]);
     FUNC_IF(free, dev->prefix);
 
     mpr_expr_stack_free(ldev->expr_stack);
@@ -260,6 +267,8 @@ void mpr_dev_on_registered(mpr_local_dev dev)
     dev->registered = 1;
     dev->ordinal = dev->ordinal_allocator.val;
     dev->status = MPR_STATUS_READY;
+
+    mpr_dev_get_name((mpr_dev)dev);
 }
 
 MPR_INLINE static int check_types(const mpr_type *types, int len, mpr_type type, int vector_len)
@@ -289,10 +298,10 @@ int mpr_dev_bundle_start(lo_timetag t, void *data)
  * - A vector consisting completely of nulls indicates a signal instance release
  *   TODO: use more specific message for release?
  * - Updates to a specific signal instance are indicated using the label
- *   "@instance" followed by a 64bit integer which uniquely identifies this
+ *   "@in" followed by a 64bit integer which uniquely identifies this
  *   instance within the network of libmapper devices
  * - Updates to specific "slots" of a convergent (i.e. multi-source) mapping
- *   are indicated using the label "@slot" followed by a single integer slot #
+ *   are indicated using the label "@sl" followed by a single integer slot #
  * - Instance creation and release may also be triggered by expression
  *   evaluation. Refer to the document "Using Instanced Signals with Libmapper"
  *   for more information.
@@ -397,7 +406,7 @@ int mpr_dev_handler(const char *path, const char *types, lo_arg **argv, int argc
             }
 
             /* otherwise try to init reserved/stolen instance with device map */
-            idmap_idx = mpr_sig_get_idmap_with_GID(sig, GID, 0, ts, 1);
+            idmap_idx = mpr_sig_get_idmap_with_GID(sig, GID, RELEASED_REMOTELY, ts, 1);
             TRACE_DEV_RETURN_UNLESS(idmap_idx >= 0, 0,
                                     "no instances available for GUID %"PR_MPR_ID" (1)\n", GID);
         }
@@ -416,9 +425,13 @@ int mpr_dev_handler(const char *path, const char *types, lo_arg **argv, int argc
     }
     else {
         /* use the first available instance */
-        idmap_idx = 0;
-        if (!sig->idmaps[0].inst)
-            idmap_idx = mpr_sig_get_idmap_with_LID(sig, sig->inst[0]->id, 1, ts, 1);
+        for (i = 0; i < sig->num_inst; i++) {
+            if (sig->inst[i]->active)
+                break;
+        }
+        if (i >= sig->num_inst)
+            i = 0;
+        idmap_idx = mpr_sig_get_idmap_with_LID(sig, sig->inst[i]->id, RELEASED_REMOTELY, ts, 1);
         RETURN_ARG_UNLESS(idmap_idx >= 0, 0);
     }
     si = sig->idmaps[idmap_idx].inst;
@@ -429,27 +442,23 @@ int mpr_dev_handler(const char *path, const char *types, lo_arg **argv, int argc
     size = mpr_type_get_size(map ? slot->sig->type : sig->type);
     if (vals == 0) {
         if (GID) {
-            /* TODO: mark SLOT status as remotely released rather than map */
+            /* TODO: mark SLOT status as remotely released rather than idmap? */
             sig->idmaps[idmap_idx].status |= RELEASED_REMOTELY;
             mpr_dev_GID_decref(dev, sig->group, idmap);
-            if (!sig->use_inst) {
+            if (!sig->ephemeral) {
                 /* clear signal's reference to idmap */
                 mpr_dev_LID_decref(dev, sig->group, idmap);
                 sig->idmaps[idmap_idx].map = 0;
-                sig->idmaps[idmap_idx].inst->active = 0;
-                sig->idmaps[idmap_idx].inst = 0;
                 return 0;
             }
         }
-        RETURN_ARG_UNLESS(sig->use_inst && (!map || map->use_inst), 0);
+        RETURN_ARG_UNLESS(sig->ephemeral && (!map || map->use_inst), 0);
 
         /* Try to release instance, but do not call mpr_rtr_process_sig() here, since we don't
          * know if the local signal instance will actually be released. */
-        if (sig->dir == MPR_DIR_IN) {
-            int evt = (MPR_SIG_REL_UPSTRM & sig->event_flags) ? MPR_SIG_REL_UPSTRM : MPR_SIG_UPDATE;
-            mpr_sig_call_handler(sig, evt, idmap->LID, 0, 0, &ts, diff);
-        }
-        else if (MPR_SIG_REL_DNSTRM & sig->event_flags)
+        if (sig->dir == MPR_DIR_IN)
+            mpr_sig_call_handler(sig, MPR_SIG_REL_UPSTRM, idmap->LID, 0, 0, &ts, diff);
+        else
             mpr_sig_call_handler(sig, MPR_SIG_REL_DNSTRM, idmap->LID, 0, 0, &ts, diff);
 
         RETURN_ARG_UNLESS(map && MPR_LOC_DST == map->process_loc && sig->dir == MPR_DIR_IN, 0);
@@ -476,7 +485,7 @@ int mpr_dev_handler(const char *path, const char *types, lo_arg **argv, int argc
     if (map) {
         /* Or if this signal slot is non-instanced but the map has other instanced
          * sources we will need to update all of the map instances. */
-        all |= !map->use_inst || (!slot->sig->use_inst && map->num_src > 1 && map->num_inst > 1);
+        all |= !map->use_inst || (map->num_src > 1 && map->num_inst > slot->sig->num_inst);
     }
     if (all)
         idmap_idx = 0;
@@ -484,14 +493,16 @@ int mpr_dev_handler(const char *path, const char *types, lo_arg **argv, int argc
     if (map) {
         for (; idmap_idx < sig->idmap_len; idmap_idx++) {
             /* check if map instance is active */
-            if ((si = sig->idmaps[idmap_idx].inst)) {
+            if ((si = sig->idmaps[idmap_idx].inst) && si->active) {
                 inst_idx = si->idx;
                 /* Setting to local timestamp here */
                 /* TODO: jitter mitigation etc. */
                 mpr_value_set_samp(&slot->val, inst_idx, argv[0], dev->time);
-                set_bitflag(map->updated_inst, inst_idx);
-                map->updated = 1;
-                dev->receiving = 1;
+                if (slot->causes_update) {
+                    set_bitflag(map->updated_inst, inst_idx);
+                    map->updated = 1;
+                    dev->receiving = 1;
+                }
             }
             if (!all)
                 break;
@@ -501,7 +512,7 @@ int mpr_dev_handler(const char *path, const char *types, lo_arg **argv, int argc
 
     for (; idmap_idx < sig->idmap_len; idmap_idx++) {
         /* check if instance is active */
-        if ((si = sig->idmaps[idmap_idx].inst)) {
+        if ((si = sig->idmaps[idmap_idx].inst) && si->active) {
             idmap = sig->idmaps[idmap_idx].map;
             for (i = 0; i < sig->len; i++) {
                 if (types[i] == MPR_NULL)
@@ -515,8 +526,7 @@ int mpr_dev_handler(const char *path, const char *types, lo_arg **argv, int argc
                 memcpy(&si->time, &ts, sizeof(mpr_time));
                 mpr_sig_call_handler(sig, MPR_SIG_UPDATE, idmap->LID, sig->len, si->val, &ts, diff);
                 /* Pass this update downstream if signal is an input and was not updated in handler. */
-                if (   !(sig->dir & MPR_DIR_OUT)
-                    && !get_bitflag(sig->updated_inst, si->idx)) {
+                if (!(sig->dir & MPR_DIR_OUT) && !get_bitflag(sig->updated_inst, si->idx)) {
                     mpr_rtr_process_sig(rtr, sig, idmap_idx, si->val, ts);
                     /* TODO: ensure update is propagated within this poll cycle */
                 }
@@ -562,16 +572,8 @@ void mpr_dev_add_sig_methods(mpr_local_dev dev, mpr_local_sig sig)
 void mpr_dev_remove_sig_methods(mpr_local_dev dev, mpr_local_sig sig)
 {
     mpr_net net;
-    char *path = 0;
-    int len;
     RETURN_UNLESS(sig && sig->is_local);
     net = &dev->obj.graph->net;
-    len = (int)strlen(sig->path) + 5;
-    path = (char*)realloc(path, len);
-    snprintf(path, len, "%s%s", sig->path, "/get");
-    lo_server_del_method(net->servers[SERVER_UDP], path, NULL);
-    lo_server_del_method(net->servers[SERVER_TCP], path, NULL);
-    free(path);
     lo_server_del_method(net->servers[SERVER_UDP], sig->path, NULL);
     lo_server_del_method(net->servers[SERVER_TCP], sig->path, NULL);
     --dev->n_output_callbacks;
@@ -810,6 +812,102 @@ int mpr_dev_poll(mpr_dev dev, int block_ms)
     return admin_count + device_count;
 }
 
+#ifdef HAVE_LIBPTHREAD
+static void *device_thread_func(void *data)
+{
+    mpr_thread_data td = (mpr_thread_data)data;
+    while (td->is_active) {
+        mpr_dev_poll((mpr_dev)td->object, 100);
+    }
+    td->is_done = 1;
+    pthread_exit(NULL);
+    return 0;
+}
+#endif
+
+#ifdef HAVE_WIN32_THREADS
+static unsigned __stdcall device_thread_func(void *data)
+{
+    mpr_thread_data td = (mpr_thread_data)data;
+    while (td->is_active) {
+        mpr_dev_poll((mpr_dev)td->object, 100);
+    }
+    td->is_done = 1;
+    _endthread();
+    return 0;
+}
+#endif
+
+int mpr_dev_start_polling(mpr_dev dev)
+{
+    mpr_thread_data td;
+    int result = 0;
+    RETURN_ARG_UNLESS(dev && dev->is_local, 0);
+    if (((mpr_local_dev)dev)->thread_data)
+        return 0;
+
+    td = (mpr_thread_data)malloc(sizeof(mpr_thread_data_t));
+    td->object = (mpr_obj)dev;
+    td->is_active = 1;
+
+
+#ifdef HAVE_LIBPTHREAD
+    result = -pthread_create(&(td->thread), 0, device_thread_func, td);
+#else
+#ifdef HAVE_WIN32_THREADS
+    if (!(td->thread = (HANDLE)_beginthreadex(NULL, 0, &device_thread_func, td, 0, NULL)))
+        result = -1;
+#else
+    printf("error: threading is not available.\n");
+#endif /* HAVE_WIN32_THREADS */
+#endif /* HAVE_LIBPTHREAD */
+
+    if (result) {
+        printf("Device error: couldn't create thread.\n");
+        free(td);
+    }
+    else {
+        ((mpr_local_dev)dev)->thread_data = td;
+    }
+    return result;
+}
+
+int mpr_dev_stop_polling(mpr_dev dev)
+{
+    mpr_thread_data td;
+    int result = 0;
+    RETURN_ARG_UNLESS(dev && dev->is_local, 0);
+    td = ((mpr_local_dev)dev)->thread_data;
+    if (!td || !td->is_active)
+        return 0;
+    td->is_active = 0;
+
+#ifdef HAVE_LIBPTHREAD
+    result = pthread_join(td->thread, NULL);
+    if (result) {
+        printf("Device error: failed to stop thread (pthread_join).\n");
+        return -result;
+    }
+#else
+#ifdef HAVE_WIN32_THREADS
+    result = WaitForSingleObject(td->thread, INFINITE);
+    CloseHandle(td->thread);
+    td->thread = NULL;
+
+    if (0 != result) {
+        printf("Device error: failed to join thread (WaitForSingleObject).\n");
+        return -1;
+    }
+#else
+    printf("error: threading is not available.\n");
+#endif /* HAVE_WIN32_THREADS */
+#endif /* HAVE_LIBPTHREAD */
+
+    free(((mpr_local_dev)dev)->thread_data);
+    ((mpr_local_dev)dev)->thread_data = 0;
+    return result;
+}
+
 mpr_time mpr_dev_get_time(mpr_dev dev)
 {
     RETURN_ARG_UNLESS(dev && dev->is_local, MPR_NOW);
@@ -836,6 +934,20 @@ void mpr_dev_reserve_idmap(mpr_local_dev dev)
     dev->idmaps.reserve = map;
 }
 
+#ifdef DEBUG
+static void print_idmaps(mpr_local_dev dev)
+{
+    printf("ID MAPS for %s:\n", dev->name);
+    mpr_id_map *map = &dev->idmaps.active[0];
+    while (*map) {
+        mpr_id_map m = *map;
+        printf("  %p: %"PR_MPR_ID" (%d) -> %"PR_MPR_ID" (%d)\n",
+               m, m->LID, m->LID_refcount, m->GID, m->GID_refcount);
+        map = &(*map)->next;
+    }
+}
+#endif
+
 mpr_id_map mpr_dev_add_idmap(mpr_local_dev dev, int group, mpr_id LID, mpr_id GID)
 {
     mpr_id_map map;
@@ -844,17 +956,23 @@ mpr_id_map mpr_dev_add_idmap(mpr_local_dev dev, int group, mpr_id LID, mpr_id GI
     map = dev->idmaps.reserve;
     map->LID = LID;
     map->GID = GID ? GID : mpr_dev_generate_unique_id((mpr_dev)dev);
+    trace_dev(dev, "mpr_dev_add_idmap(%s) %"PR_MPR_ID" -> %"PR_MPR_ID"\n", dev->name, LID, map->GID);
     map->LID_refcount = 1;
     map->GID_refcount = 0;
     dev->idmaps.reserve = map->next;
     map->next = dev->idmaps.active[group];
     dev->idmaps.active[group] = map;
+#ifdef DEBUG
+    print_idmaps(dev);
+#endif
     return map;
 }
 
 static void mpr_dev_remove_idmap(mpr_local_dev dev, int group, mpr_id_map rem)
 {
     mpr_id_map *map = &dev->idmaps.active[group];
+    trace_dev(dev, "mpr_dev_remove_idmap(%s) %"PR_MPR_ID" -> %"PR_MPR_ID"\n",
+              dev->name, rem->LID, rem->GID);
     while (*map) {
         if ((*map) == rem) {
             *map = (*map)->next;
@@ -864,11 +982,17 @@ static void mpr_dev_remove_idmap(mpr_local_dev dev, int group, mpr_id_map rem)
         }
         map = &(*map)->next;
     }
+#ifdef DEBUG
+    print_idmaps(dev);
+#endif
 }
 
 int mpr_dev_LID_decref(mpr_local_dev dev, int group, mpr_id_map map)
 {
+    trace_dev(dev, "mpr_dev_LID_decref(%s) %"PR_MPR_ID" -> %"PR_MPR_ID"\n",
+              dev->name, map->LID, map->GID);
     --map->LID_refcount;
+    trace_dev(dev, "  refcounts: {LID:%d, GID:%d}\n", map->LID_refcount, map->GID_refcount);
     if (map->LID_refcount <= 0) {
         map->LID_refcount = 0;
         if (map->GID_refcount <= 0) {
@@ -881,7 +1005,10 @@ int mpr_dev_LID_decref(mpr_local_dev dev, int group, mpr_id_map map)
 
 int mpr_dev_GID_decref(mpr_local_dev dev, int group, mpr_id_map map)
 {
+    trace_dev(dev, "mpr_dev_GID_decref(%s) %"PR_MPR_ID" -> %"PR_MPR_ID"\n",
+              dev->name, map->LID, map->GID);
     --map->GID_refcount;
+    trace_dev(dev, "  refcounts: {LID:%d, GID:%d}\n", map->LID_refcount, map->GID_refcount);
     if (map->GID_refcount <= 0) {
         map->GID_refcount = 0;
         if (map->LID_refcount <= 0) {
@@ -920,27 +1047,28 @@ static void handler_error(int num, const char *msg, const char *where)
     trace_net("[libmapper] liblo server error %d in path %s: %s\n", num, where, msg);
 }
 
-void mpr_dev_start_servers(mpr_local_dev dev)
+static void mpr_dev_start_servers(mpr_local_dev dev)
 {
     int portnum;
     char port[16], *pport = 0, *url, *host;
     mpr_net net = &dev->obj.graph->net;
     mpr_list sigs;
-    RETURN_UNLESS(!net->servers[SERVER_UDP] && !net->servers[SERVER_TCP]);
-    while (!(net->servers[SERVER_UDP] = lo_server_new(pport, handler_error)))
-        pport = 0;
-    snprintf(port, 16, "%d", lo_server_get_port(net->servers[SERVER_UDP]));
-    pport = port;
-    while (!(net->servers[SERVER_TCP] = lo_server_new_with_proto(pport, LO_TCP, handler_error)))
-        pport = 0;
+    if (!net->servers[SERVER_UDP] && !net->servers[SERVER_TCP]) {
+        while (!(net->servers[SERVER_UDP] = lo_server_new(pport, handler_error)))
+            pport = 0;
+        snprintf(port, 16, "%d", lo_server_get_port(net->servers[SERVER_UDP]));
+        pport = port;
+        while (!(net->servers[SERVER_TCP] = lo_server_new_with_proto(pport, LO_TCP, handler_error)))
+            pport = 0;
 
-    /* Disable liblo message queueing */
-    lo_server_enable_queue(net->servers[SERVER_UDP], 0, 1);
-    lo_server_enable_queue(net->servers[SERVER_TCP], 0, 1);
+        /* Disable liblo message queueing */
+        lo_server_enable_queue(net->servers[SERVER_UDP], 0, 1);
+        lo_server_enable_queue(net->servers[SERVER_TCP], 0, 1);
 
-    /* Add bundle handlers */
-    lo_server_add_bundle_handlers(net->servers[SERVER_UDP], mpr_dev_bundle_start, NULL, (void*)dev);
-    lo_server_add_bundle_handlers(net->servers[SERVER_TCP], mpr_dev_bundle_start, NULL, (void*)dev);
+        /* Add bundle handlers */
+        lo_server_add_bundle_handlers(net->servers[SERVER_UDP], mpr_dev_bundle_start, NULL, (void*)dev);
+        lo_server_add_bundle_handlers(net->servers[SERVER_TCP], mpr_dev_bundle_start, NULL, (void*)dev);
+    }
 
     portnum = lo_server_get_port(net->servers[SERVER_UDP]);
     mpr_tbl_set(dev->obj.props.synced, PROP(PORT), NULL, 1, MPR_INT32, &portnum, NON_MODIFIABLE);
@@ -982,7 +1110,7 @@ const char *mpr_dev_get_name(mpr_dev dev)
 
 int mpr_dev_get_is_ready(mpr_dev dev)
 {
-    return dev ? dev->status >= MPR_STATUS_READY : MPR_STATUS_UNDEFINED;
+    return dev ? dev->status >= MPR_STATUS_READY : 0;
 }
 
 mpr_id mpr_dev_generate_unique_id(mpr_dev dev)
@@ -1119,11 +1247,11 @@ static int mpr_dev_send_sigs(mpr_local_dev dev, mpr_dir dir)
     return 0;
 }
 
-static int mpr_dev_send_maps(mpr_local_dev dev, mpr_dir dir)
+int mpr_dev_send_maps(mpr_local_dev dev, mpr_dir dir, int msg)
 {
     mpr_list l = mpr_dev_get_maps((mpr_dev)dev, dir);
     while (l) {
-        mpr_map_send_state((mpr_map)*l, -1, MSG_MAPPED);
+        mpr_map_send_state((mpr_map)*l, -1, msg);
         l = mpr_list_get_next(l);
     }
     return 0;
@@ -1160,8 +1288,8 @@ void mpr_dev_manage_subscriber(mpr_local_dev dev, lo_address addr, int flags,
                 /* reset timeout */
                 int temp = flags;
 #ifdef DEBUG
-                trace_dev(dev, "renewing subscription from %s:%s for %d seconds"
-                          "with flags ", s_ip, s_port, timeout_sec);
+                trace_dev(dev, "renewing subscription from %s:%s for %d seconds with flags ",
+                          s_ip, s_port, timeout_sec);
                 print_subscription_flags(flags);
 #endif
                 (*s)->lease_exp = t.sec + timeout_sec;
@@ -1212,7 +1340,7 @@ void mpr_dev_manage_subscriber(mpr_local_dev dev, lo_address addr, int flags,
         if (flags & MPR_MAP_OUT)
             dir |= MPR_DIR_OUT;
         mpr_net_use_mesh(net, addr);
-        mpr_dev_send_maps(dev, dir);
+        mpr_dev_send_maps(dev, dir, MSG_MAPPED);
         mpr_net_send(net);
     }
 }

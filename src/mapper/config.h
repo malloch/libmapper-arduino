@@ -1,6 +1,9 @@
 /* src/config.h.  Generated from config.h.in by configure.  */
 /* src/config.h.in.  Generated from configure.ac by autoheader.  */
 
+/* Define this to enable threads. */
+#define ENABLE_THREADS 1
+
 /* Define to 1 if you have the <arpa/inet.h> header file. */
 #define HAVE_ARPA_INET_H 1
 
@@ -43,17 +46,17 @@
 /* Define to use lo_address_set_iface function in liblo. */
 #define HAVE_LIBLO_SET_IFACE /**/
 
+/* Define to use the pthread library for threading. */
+#define HAVE_LIBPTHREAD 1
+
 /* Define to 1 if you have the `z' library (-lz). */
 #define HAVE_LIBZ 1
 
-/* Define to 1 if you have the <memory.h> header file. */
-#define HAVE_MEMORY_H 1
-
-/* Define if you have POSIX threads libraries and header files. */
-#define HAVE_PTHREAD 1
-
 /* Define to 1 if you have the <stdint.h> header file. */
 #define HAVE_STDINT_H 1
+
+/* Define to 1 if you have the <stdio.h> header file. */
+#define HAVE_STDIO_H 1
 
 /* Define to 1 if you have the <stdlib.h> header file. */
 #define HAVE_STDLIB_H 1
@@ -79,6 +82,9 @@
 /* Define to 1 if you have the <unistd.h> header file. */
 #define HAVE_UNISTD_H 1
 
+/* Define to use the win32 library for threading. */
+/* #undef HAVE_WIN32_THREADS */
+
 /* Define to 1 if you have the <winsock2.h> header file. */
 /* #undef HAVE_WINSOCK2_H */
 
@@ -98,7 +104,7 @@
 #define PACKAGE_NAME "libmapper"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "libmapper 1.2-346-g696aee21"
+#define PACKAGE_STRING "libmapper 1.2.552+gc906c0e5"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "libmapper"
@@ -107,20 +113,15 @@
 #define PACKAGE_URL "http://libmapper.org"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "1.2-346-g696aee21"
+#define PACKAGE_VERSION "1.2.552+gc906c0e5"
 
-/* printf code for type long long int */
-#define PRINTF_LL "ll"
-
-/* Define to necessary symbol if this constant uses a non-standard name on
-   your system. */
-/* #undef PTHREAD_CREATE_JOINABLE */
-
-/* Define to 1 if you have the ANSI C header files. */
+/* Define to 1 if all of the C90 standard headers exist (not just the ones
+   required in a freestanding environment). This macro is provided for
+   backward compatibility; new code need not use it. */
 #define STDC_HEADERS 1
 
 /* Version number of package */
-#define VERSION "1.2-346-g696aee21"
+#define VERSION "1.2.552+gc906c0e5"
 
 /* Define to empty if `const' does not conform to ANSI C. */
 /* #undef const */

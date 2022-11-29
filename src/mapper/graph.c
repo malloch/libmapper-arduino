@@ -4,9 +4,21 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <zlib.h>
+#ifndef _MSC_VER
 #include <sys/time.h>
+#else
 
+#endif
 #include "mapper_internal.h"
+
+#ifdef HAVE_LIBPTHREAD
+#include <pthread.h>
+static void* graph_thread_func(void *data);
+#endif
+
+#ifdef HAVE_WIN32_THREADS
+static unsigned __stdcall graph_thread_func(void *data);
+#endif
 
 #define AUTOSUB_INTERVAL 60
 extern const char* net_msg_strings[NUM_MSG_STRINGS];
@@ -58,7 +70,7 @@ static void send_subscribe_msg(mpr_graph g, mpr_dev d, int flags, int timeout)
 {
     char cmd[1024];
     NEW_LO_MSG(msg, return);
-    snprintf(cmd, 1024, "/%s/subscribe", d->name);
+    snprintf(cmd, 1024, "/%s/subscribe", d->name); /* MSG_SUBSCRIBE */
 
     set_net_dst(g, d);
     if (MPR_OBJ == flags)
@@ -204,6 +216,15 @@ void mpr_graph_free(mpr_graph g)
         list = mpr_list_get_next(list);
         if (!map->is_local)
             mpr_graph_remove_map(g, map, MPR_OBJ_REM);
+    }
+
+    /* Remove all non-local links */
+    list = mpr_list_from_data(g->links);
+    while (list) {
+        mpr_link link = (mpr_link)*list;
+        list = mpr_list_get_next(list);
+        if (!link->devs[0]->is_local && !link->devs[1]->is_local)
+            mpr_graph_remove_link(g, link, MPR_OBJ_REM);
     }
 
     /* Remove all non-local devices and signals from the graph except for
@@ -403,6 +424,7 @@ void mpr_graph_remove_dev(mpr_graph g, mpr_dev d, mpr_graph_evt e, int quiet)
 
     FUNC_IF(mpr_tbl_free, d->obj.props.synced);
     FUNC_IF(mpr_tbl_free, d->obj.props.staged);
+    FUNC_IF(free, d->linked);
     FUNC_IF(free, d->name);
     mpr_list_free_item(d);
 }
@@ -453,6 +475,7 @@ mpr_sig mpr_graph_add_sig(mpr_graph g, const char *name, const char *dev_name, m
         dev = mpr_graph_add_dev(g, dev_name, 0);
 
     if (!sig) {
+        int num_inst = 1;
         trace_graph("adding signal '%s:%s'.\n", dev_name, name);
         sig = (mpr_sig)mpr_list_add_item((void**)&g->sigs, sizeof(mpr_sig_t));
 
@@ -461,7 +484,7 @@ mpr_sig mpr_graph_add_sig(mpr_graph g, const char *name, const char *dev_name, m
         sig->obj.graph = g;
         sig->is_local = 0;
 
-        mpr_sig_init(sig, MPR_DIR_UNDEFINED, name, 0, 0, 0, 0, 0, 0);
+        mpr_sig_init(sig, MPR_DIR_UNDEFINED, name, 0, 0, 0, 0, 0, &num_inst);
         rc = 1;
     }
 
@@ -509,6 +532,10 @@ mpr_link mpr_graph_add_link(mpr_graph g, mpr_dev dev1, mpr_dev dev2)
     if (dev2->is_local) {
         link->devs[LOCAL_DEV] = dev2;
         link->devs[REMOTE_DEV] = dev1;
+        if (dev1->is_local)
+            link->is_local_only = 1;
+        else
+            link->is_local_only = 0;
     }
     else {
         link->devs[LOCAL_DEV] = dev1;
@@ -591,8 +618,8 @@ mpr_map mpr_graph_add_map(mpr_graph g, mpr_id id, int num_src, const char **src_
     /* We could be part of larger "convergent" mapping, so we will retrieve
      * record by mapping id instead of names. */
     if (id) {
-        map = (mpr_map)_obj_by_id(g, (mpr_obj)g->maps, id);
-        if (!map && _obj_by_id(g, (mpr_obj)g->maps, 0)) {
+        map = (mpr_map)_obj_by_id(g, g->maps, id);
+        if (!map && _obj_by_id(g, g->maps, 0)) {
             /* may have staged map stored locally */
             map = mpr_graph_get_map_by_names(g, num_src, src_names, dst_name);
         }
@@ -816,6 +843,100 @@ int mpr_graph_poll(mpr_graph g, int block_ms)
 
     n->msgs_recvd |= count;
     return count;
+}
+
+#ifdef HAVE_LIBPTHREAD
+static void *graph_thread_func(void *data)
+{
+    mpr_thread_data td = (mpr_thread_data)data;
+    while (td->is_active) {
+        mpr_graph_poll((mpr_graph)td->object, 10);
+    }
+    td->is_done = 1;
+    pthread_exit(NULL);
+    return 0;
+}
+#endif
+
+#ifdef HAVE_WIN32_THREADS
+static unsigned __stdcall graph_thread_func(void *data)
+{
+    mpr_thread_data td = (mpr_thread_data)data;
+    while (td->is_active) {
+        mpr_graph_poll((mpr_graph)td->object, 10);
+    }
+    td->is_done = 1;
+    _endthread();
+    return 0;
+}
+#endif
+
+int mpr_graph_start_polling(mpr_graph g)
+{
+    mpr_thread_data td;
+    int result = 0;
+    RETURN_ARG_UNLESS(g && !g->thread_data, 0);
+
+    td = (mpr_thread_data)malloc(sizeof(mpr_thread_data_t));
+    td->object = (mpr_obj)g;
+    td->is_active = 1;
+
+
+#ifdef HAVE_LIBPTHREAD
+    result = -pthread_create(&(td->thread), 0, graph_thread_func, td);
+#else
+#ifdef HAVE_WIN32_THREADS
+    if (!(td->thread = (HANDLE)_beginthreadex(NULL, 0, &graph_thread_func, td, 0, NULL)))
+        result = -1;
+#else
+    printf("error: threading is not available.\n");
+#endif /* HAVE_WIN32_THREADS */
+#endif /* HAVE_LIBPTHREAD */
+
+    if (result) {
+        printf("Graph error: couldn't create thread.\n");
+        free(td);
+    }
+    else {
+        g->thread_data = td;
+    }
+    return result;
+}
+
+int mpr_graph_stop_polling(mpr_graph g)
+{
+    mpr_thread_data td;
+    int result = 0;
+    RETURN_ARG_UNLESS(g, 0);
+    td = g->thread_data;
+    if (!td || !td->is_active)
+        return 0;
+    td->is_active = 0;
+
+#ifdef HAVE_LIBPTHREAD
+    result = pthread_join(td->thread, NULL);
+    if (result) {
+        printf("Graph error: failed to stop thread (pthread_join).\n");
+        return -result;
+    }
+#else
+#ifdef HAVE_WIN32_THREADS
+    result = WaitForSingleObject(td->thread, INFINITE);
+    CloseHandle(td->thread);
+    td->thread = NULL;
+
+    if (0 != result) {
+        printf("Graph error: failed to join thread (WaitForSingleObject).\n");
+        return -1;
+    }
+#else
+    printf("error: threading is not available.\n");
+#endif /* HAVE_WIN32_THREADS */
+#endif /* HAVE_LIBPTHREAD */
+
+    free(g->thread_data);
+    g->thread_data = 0;
+    return result;
 }
 
 static mpr_subscription _get_subscription(mpr_graph g, mpr_dev d)

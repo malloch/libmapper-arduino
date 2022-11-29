@@ -249,78 +249,6 @@ int lo_send_from_internal(lo_address to, lo_server from, const char *file,
     return ret;
 }
 
-#if 0
-
-This(incomplete)
-function converts from printf - style formats to OSC typetags,
-    but I think its dangerous and mislieading so its not available at the
-    moment.static char *format_to_types(const char *format);
-
-static char *format_to_types(const char *format)
-{
-    const char *ptr;
-    char *types = malloc(sizeof(format) + 1);
-    char *out = types;
-    int inspec = 0;
-    int width = 0;
-    int number = 0;
-
-    if (!format) {
-        return NULL;
-    }
-
-    for (ptr = format; *ptr; ptr++) {
-        if (inspec) {
-            if (*ptr == 'l') {
-                width++;
-            } else if (*ptr >= '0' && *ptr <= '9') {
-                number *= 10;
-                number += *ptr - '0';
-            } else if (*ptr == 'd') {
-                if (width < 2 && number < 64) {
-                    *out++ = LO_INT32;
-                } else {
-                    *out++ = LO_INT64;
-                }
-            } else if (*ptr == 'f') {
-                if (width < 2 && number < 64) {
-                    *out++ = LO_FLOAT;
-                } else {
-                    *out++ = LO_DOUBLE;
-                }
-            } else if (*ptr == '%') {
-                fprintf(stderr,
-                        "liblo warning, unexpected '%%' in format\n");
-                inspec = 1;
-                width = 0;
-                number = 0;
-            } else {
-                fprintf(stderr,
-                        "liblo warning, unrecognised character '%c' "
-                        "in format\n", *ptr);
-            }
-        } else {
-            if (*ptr == '%') {
-                inspec = 1;
-                width = 0;
-                number = 0;
-            } else if (*ptr == LO_TRUE || *ptr == LO_FALSE
-                       || *ptr == LO_NIL || *ptr == LO_INFINITUM) {
-                *out++ = *ptr;
-            } else {
-                fprintf(stderr,
-                        "liblo warning, unrecognised character '%c' "
-                        "in format\n", *ptr);
-            }
-        }
-    }
-    *out++ = '\0';
-
-    return types;
-}
-
-#endif
-
 #if !defined(WIN32)
 static int is_local_broadcast(struct addrinfo *ai){ 
     struct ifaddrs *ifap, *ifa;
@@ -471,10 +399,13 @@ static int create_socket(lo_address a)
 #define SLIP_ESC_ESC    0335    /* ESC ESC_ESC means ESC data byte */
 
 static unsigned char *slip_encode(const unsigned char *data,
-                                  size_t *data_len)
+                                  size_t *data_len,
+                                  int double_end_slip_enabled)
 {
     size_t i, j = 0, len=*data_len;
     unsigned char *slipdata = (unsigned char *) malloc(len*2);
+    if (double_end_slip_enabled)
+        slipdata[j++] = SLIP_END;
     for (i=0; i<len; i++) {
         switch (data[i])
         {
@@ -517,7 +448,7 @@ static int send_data(lo_address a, lo_server from, char *data,
     if (!a->ai) {
         ret = lo_address_resolve(a);
         if (ret)
-            return ret;
+            return (int) ret;
     }
     // Re-use existing socket?
     if (from && a->protocol == LO_UDP) {
@@ -528,13 +459,15 @@ static int send_data(lo_address a, lo_server from, char *data,
         if (a->socket == -1) {
             ret = create_socket(a);
             if (ret)
-                return ret;
+                return (int) ret;
+        }
 
-            // If we are sending TCP, we may later receive on sending
-            // socket, so add it to the from server's socket list.
-            if (from && a->protocol == LO_TCP
-                && (a->socket >= from->sources_len
-                    || from->sources[a->socket].host == NULL))
+        // If we are sending TCP, we may later receive on sending
+        // socket, so add it to the from server's socket list.
+        if (from && a->protocol == LO_TCP)
+        {
+            if (a->socket >= from->sources_len
+                || from->sources[a->socket].host == NULL)
             {
                 lo_server_add_socket(from, a->socket, a, 0, 0);
 
@@ -557,12 +490,12 @@ static int send_data(lo_address a, lo_server from, char *data,
             struct addrinfo* ai;
             if (a->addr.size == sizeof(struct in_addr)) {
                 setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
-                           (const char*)&a->addr.a, a->addr.size);
+                           (const char*)&a->addr.a, (socklen_t) a->addr.size);
             }
 #ifdef ENABLE_IPV6
             else if (a->addr.size == sizeof(struct in6_addr)) {
                 setsockopt(sock, IPPROTO_IP, IPV6_MULTICAST_IF,
-                           (const char*)&a->addr.a, a->addr.size);
+                           (const char*)&a->addr.a, (socklen_t) a->addr.size);
             }
 #endif
             if (a->ttl >= 0) {
@@ -580,10 +513,22 @@ static int send_data(lo_address a, lo_server from, char *data,
             } while (ret == -1 && ai != NULL);
             if (ret == -1 && ai != NULL && a->ai!=ai)
                 a->ai = ai;
+#if !defined(WIN32) && !defined(_MSC_VER)
+        } else if (a->protocol == LO_UNIX && from && from->protocol == LO_UNIX) {
+            struct sockaddr_un saddr;
+            size_t len = data_len;
+
+            saddr.sun_family = AF_UNIX;
+            strncpy(saddr.sun_path, a->port, sizeof(saddr.sun_path) - 1);
+
+            ret = sendto(from->sockets[0].fd, data, len, MSG_NOSIGNAL, (struct sockaddr*)&saddr, sizeof(struct sockaddr_un));
+#endif
         } else {
+
             size_t len = data_len;
             if (a->flags & LO_SLIP)
-                data = (char*)slip_encode((unsigned char*)data, &len);
+                data = (char*)slip_encode((unsigned char*)data, &len,
+                                          a->flags & LO_SLIP_DBL_END);
 
             ret = send(sock, data, len, MSG_NOSIGNAL);
 
@@ -607,7 +552,7 @@ static int send_data(lo_address a, lo_server from, char *data,
         a->errstr = NULL;
     }
 
-    return ret;
+    return (int) ret;
 }
 
 

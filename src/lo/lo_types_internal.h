@@ -52,8 +52,9 @@ typedef SSIZE_T ssize_t;
 /** \brief Bitflags for optional protocol features, set by
  *         lo_address_set_flags(). */
 typedef enum {
-    LO_SLIP=0x01,     /*!< SLIP decoding */
-    LO_NODELAY=0x02,  /*!< Set the TCP_NODELAY socket option. */
+    LO_SLIP=0x01,         /*!< SLIP decoding */
+    LO_NODELAY=0x02,      /*!< Set the TCP_NODELAY socket option. */
+    LO_SLIP_DBL_END=0x04, /*!< Set SLIP encoding to double-END. */
 } lo_proto_flags;
 
 /** \brief Bitflags for optional server features. */
@@ -140,8 +141,8 @@ struct socket_context {
     size_t buffer_size;
     unsigned int buffer_msg_offset;
     unsigned int buffer_read_offset;
-    int is_slip;                        //<! 1 if slip mode, 0 otherwise, -1 for unknown
-    int slip_state;                     //<! state variable for slip decoding
+    int is_slip;    /*!< 1 if slip mode, 0 otherwise, -1 for unknown */
+    int slip_state; /*!< state variable for slip decoding */
 };
 
 #ifdef HAVE_POLL

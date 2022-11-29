@@ -416,7 +416,7 @@ static int lo_server_set_iface(lo_server s, int fam, const char *iface, const ch
 
     if (s->addr_if.size == sizeof(struct in_addr)) {
         if (setsockopt(s->sockets[0].fd, IPPROTO_IP, IP_MULTICAST_IF,
-                       (const char*)&s->addr_if.a.addr, s->addr_if.size) < 0)
+                       (const char*)&s->addr_if.a.addr, (socklen_t) s->addr_if.size) < 0)
 		{
             err = geterror();
             lo_throw(s, err, strerror(err), "setsockopt(IP_MULTICAST_IF)");
@@ -426,7 +426,7 @@ static int lo_server_set_iface(lo_server s, int fam, const char *iface, const ch
 #ifdef ENABLE_IPV6 // TODO: this setsockopt fails on linux
     else if (s->addr_if.size == sizeof(struct in6_addr)) {
         if (setsockopt(s->sockets[0].fd, IPPROTO_IP, IPV6_MULTICAST_IF,
-                       &s->addr_if.a.addr6, s->addr_if.size) < 0) {
+                       &s->addr_if.a.addr6, (socklen_t) s->addr_if.size) < 0) {
             err = geterror();
             lo_throw(s, err, strerror(err), "setsockopt(IPV6_MULTICAST_IF)");
             return err;
@@ -924,8 +924,8 @@ void *lo_server_recv_raw(lo_server s, size_t * size)
 
     s->addr_len = sizeof(s->addr);
 
-    ret = recvfrom(s->sockets[0].fd, buffer, s->max_msg_size, 0,
-                   (struct sockaddr *) &s->addr, &s->addr_len);
+    ret = (int) recvfrom(s->sockets[0].fd, buffer, s->max_msg_size, 0,
+                         (struct sockaddr *) &s->addr, &s->addr_len);
     if (ret <= 0) {
         if (heap_buffer) free(buffer);
         return NULL;
@@ -1108,7 +1108,7 @@ int lo_server_recv_raw_stream_socket(lo_server s, int isock,
         return 1;
     }
 
-    buffer_bytes_left = sc->buffer_size - sc->buffer_read_offset;
+    buffer_bytes_left = (int) (sc->buffer_size - sc->buffer_read_offset);
 
     // If we need more than half the buffer, double the buffer size.
     size = sc->buffer_size;
@@ -1128,7 +1128,7 @@ int lo_server_recv_raw_stream_socket(lo_server s, int isock,
             break;
         }
 
-        buffer_bytes_left = size - sc->buffer_read_offset;
+        buffer_bytes_left = (int) (size - sc->buffer_read_offset);
     }
 
     if ((size_t)size > sc->buffer_size)
@@ -1142,7 +1142,7 @@ int lo_server_recv_raw_stream_socket(lo_server s, int isock,
     }
 
     // Read as much as we can into the remaining buffer memory.
-    buffer_bytes_left = sc->buffer_size - sc->buffer_read_offset;
+    buffer_bytes_left = (int) (sc->buffer_size - sc->buffer_read_offset);
 
     read_into = sc->buffer + sc->buffer_read_offset;
 
@@ -1153,9 +1153,9 @@ int lo_server_recv_raw_stream_socket(lo_server s, int isock,
         read_into = stack_buffer;
     }
 
-    bytes_recv = recv(s->sockets[isock].fd,
-                      read_into,
-                      buffer_bytes_left, 0);
+    bytes_recv = (int) recv(s->sockets[isock].fd,
+                            read_into,
+                            buffer_bytes_left, 0);
 
     if (bytes_recv <= 0)
     {
@@ -1360,7 +1360,6 @@ void *lo_server_recv_raw_stream(lo_server s, size_t * size, int *psock)
                 sock = accept(sock, (struct sockaddr *) &addr, &addr_len);
 
                 i = lo_server_add_socket(s, sock, 0, &addr, addr_len);
-                init_context(&s->contexts[i]);
 
                 /* after adding a new socket, call select()/poll()
                  * again, since we are supposed to block until a
@@ -1396,7 +1395,7 @@ int lo_server_wait(lo_server s, int timeout)
 
 int lo_servers_wait(lo_server *s, int *status, int num_servers, int timeout)
 {
-    int i, j, sched_timeout;
+    int i, j, k, sched_timeout;
 
     if (!status)
         status = alloca(sizeof(int) * num_servers);
@@ -1420,19 +1419,23 @@ int lo_servers_wait(lo_server *s, int *status, int num_servers, int timeout)
 
   again:
     num_sockets = 0;
-    for (j = 0; j < num_servers; j++) {
+    for (j = 0, k = 0; j < num_servers; j++) {
         for (i = 0; i < s[j]->sockets_len; i++) {
             if (lo_server_buffer_contains_msg(s[j], i)) {
                 status[j] = 1;
+		++k;
             }
             ++num_sockets;
         }
     }
 
+    // Return immediately if one or more servers already have messages waiting.
+    if (k > 0)
+      return k;
+
     struct pollfd *sockets = alloca(sizeof(struct pollfd) * num_sockets);
 
     sched_timeout = timeout;
-    int k;
     for (j = 0, k = 0; j < num_servers; j++) {
         for (i = 0; i < s[j]->sockets_len; i++) {
             sockets[k].fd = s[j]->sockets[i].fd;
@@ -1461,8 +1464,6 @@ int lo_servers_wait(lo_server *s, int *status, int num_servers, int timeout)
                 i = lo_server_add_socket(s[j], sock, 0, &addr[j], addr_len);
                 if (i < 0)
                     closesocket(sock);
-
-                init_context(&s[j]->contexts[i]);
 
                 lo_timetag_now(&now);
 
@@ -1547,8 +1548,6 @@ int lo_servers_wait(lo_server *s, int *status, int num_servers, int timeout)
                     i = lo_server_add_socket(s[j], sock, 0, &addr, addr_len);
                     if (i < 0)
                         closesocket(sock);
-
-                    init_context(&s[j]->contexts[i]);
 
                     lo_timetag_now(&now);
 
@@ -1731,7 +1730,7 @@ int lo_server_recv(lo_server s)
         return -1;
     }
     free(data);
-    return size;
+    return (int) size;
 }
 
 int lo_server_add_socket(lo_server s, int socket, lo_address a,
@@ -1764,13 +1763,14 @@ int lo_server_add_socket(lo_server s, int socket, lo_address a,
         if (!sc)
             return -1;
         s->contexts = (struct socket_context *) sc;
-        memset((char*)sc + s->sockets_alloc*sizeof(*s->contexts),
-               0, s->sockets_alloc*sizeof(*s->contexts));
 
         s->sockets_alloc *= 2;
     }
 
+    /* Initialize new socket and context */
     s->sockets[s->sockets_len].fd = socket;
+    init_context(&s->contexts[s->sockets_len]);
+
     s->sockets_len++;
 
     /* Update socket-indexed array of sources */
@@ -1822,8 +1822,8 @@ static int dispatch_data(lo_server s, void *data,
     char *path = (char*) data;
     ssize_t len = lo_validate_string(data, size);
     if (len < 0) {
-        lo_throw(s, -len, "Invalid message path", NULL);
-        return len;
+        lo_throw(s, (int) -len, "Invalid message path", NULL);
+        return (int) len;
     }
 
     if (!strcmp((const char *) data, "#bundle")) {
@@ -1834,11 +1834,11 @@ static int dispatch_data(lo_server s, void *data,
 
         ssize_t bundle_result = lo_validate_bundle(data, size);
         if (bundle_result < 0) {
-            lo_throw(s, -bundle_result, "Invalid bundle", NULL);
-            return bundle_result;
+            lo_throw(s, (int) -bundle_result, "Invalid bundle", NULL);
+            return (int) bundle_result;
         }
         pos = (char*) data + len;
-        remain = size - len;
+        remain = (int) (size - len);
 
         lo_timetag_now(&now);
         ts.sec = lo_otoh32(*((uint32_t *) pos));
@@ -1902,7 +1902,7 @@ static int dispatch_data(lo_server s, void *data,
         dispatch_method(s, (const char *)data, msg, sock);
         lo_message_free(msg);
     }
-    return size;
+    return (int) size;
 }
 
 int lo_server_dispatch_data(lo_server s, void *data, size_t size)
@@ -1933,7 +1933,7 @@ static void dispatch_method(lo_server s, const char *path,
                             lo_message msg, int sock)
 {
     char *types = msg->types + 1;
-    int argc = strlen(types);
+    int argc = (int) strlen(types);
     lo_method it;
     int ret = 1;
     int pattern = lo_string_contains_pattern(path);
@@ -2033,7 +2033,7 @@ static void dispatch_method(lo_server s, const char *path,
         /* if its a method enumeration call */
         if (pos && *(pos + 1) == '\0') {
             lo_message reply = lo_message_new();
-            int len = strlen(path);
+            int len = (int) strlen(path);
             lo_strlist *sl = NULL, *slit, *slnew, *slend;
 
             lo_arg **argv = msg->argv;
@@ -2048,7 +2048,7 @@ static void dispatch_method(lo_server s, const char *path,
                     char *tmp;
                     char *sec;
 
-                    int tmplen = strlen(it->path + len) + 1;
+                    int tmplen = (int) strlen(it->path + len) + 1;
                     tmp = (char*) malloc(strlen(it->path + len) + 1);
                     strncpy(tmp, it->path + len, tmplen);
                     tmp[tmplen-1]=0;

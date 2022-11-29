@@ -146,10 +146,10 @@ mpr_prop mpr_tbl_get_prop_by_key(mpr_tbl t, const char *key, int *len, mpr_type 
     if (pub)
         *pub = found ? rec->flags ^ LOCAL_ACCESS_ONLY : 0;
 
-    return found ? rec->prop : MPR_PROP_UNKNOWN;
+    return found ? MASK_PROP_BITFLAGS(rec->prop) : MPR_PROP_UNKNOWN;
 }
 
-mpr_prop mpr_tbl_get_prop_by_idx(mpr_tbl t, mpr_prop prop, const char **key, int *len,
+mpr_prop mpr_tbl_get_prop_by_idx(mpr_tbl t, int prop, const char **key, int *len,
                                  mpr_type *type, const void **val, int *pub)
 {
     int found = 1;
@@ -192,7 +192,7 @@ mpr_prop mpr_tbl_get_prop_by_idx(mpr_tbl t, mpr_prop prop, const char **key, int
     if (pub)
         *pub = found ? rec->flags ^ LOCAL_ACCESS_ONLY : 0;
 
-    return found ? rec->prop : MPR_PROP_UNKNOWN;
+    return found ? MASK_PROP_BITFLAGS(rec->prop) : MPR_PROP_UNKNOWN;
 }
 
 int mpr_tbl_remove(mpr_tbl t, mpr_prop prop, const char *key, int flags)
@@ -215,7 +215,7 @@ int mpr_tbl_remove(mpr_tbl t, mpr_prop prop, const char *key, int flags)
             }
             else {
                 trace("Cannot remove static property [%d] '%s'\n", prop,
-                      key ?: mpr_prop_as_str(prop, 1));
+                      key ? key : mpr_prop_as_str(prop, 1));
             }
             return 0;
         }
@@ -256,8 +256,7 @@ void mpr_tbl_clear_empty(mpr_tbl t)
 
 /* For unknown reasons, strcpy crashes here with -O2, so we'll use memcpy
  * instead, which does not crash. */
-static int update_elements(mpr_tbl_record rec, unsigned int len, mpr_type type,
-                           const void *val)
+static int update_elements(mpr_tbl_record rec, unsigned int len, mpr_type type, const void *val)
 {
     int i, updated = 0;
     void *old_val, *new_val;
@@ -276,7 +275,7 @@ static int update_elements(mpr_tbl_record rec, unsigned int len, mpr_type type,
         updated = 1;
     }
     switch (type) {
-            case MPR_STR:
+        case MPR_STR:
             if (1 == len) {
                 if (old_val) {
                     if (strcmp((char*)old_val, (char*)val)) {
@@ -366,7 +365,7 @@ int set_internal(mpr_tbl t, mpr_prop prop, const char *key, int len,
 
 /* Higher-level interface, where table stores arbitrary arguments along
  * with their type. */
-int mpr_tbl_set(mpr_tbl t, mpr_prop prop, const char *key, int len,
+int mpr_tbl_set(mpr_tbl t, int prop, const char *key, int len,
                 mpr_type type, const void *args, int flags)
 {
     if (!args && !(flags & REMOTE_MODIFY))
@@ -374,8 +373,7 @@ int mpr_tbl_set(mpr_tbl t, mpr_prop prop, const char *key, int len,
     return set_internal(t, prop, key, len, type, args, flags);
 }
 
-void mpr_tbl_link(mpr_tbl t, mpr_prop prop, int len, mpr_type type, void *val,
-                  int flags)
+void mpr_tbl_link(mpr_tbl t, mpr_prop prop, int len, mpr_type type, void *val, int flags)
 {
     mpr_tbl_add(t, prop, NULL, len, type, val, flags);
 }
@@ -430,6 +428,8 @@ static int update_elements_osc(mpr_tbl_record rec, unsigned int len,
             type = MPR_BOOL;
             break;
         default:
+            free(val);
+            return 0;
             break;
     }
 
@@ -481,7 +481,7 @@ static void mpr_record_add_to_msg(mpr_tbl_record rec, lo_message msg)
         list = mpr_list_get_cpy((mpr_list)val);
         if (!list) {
             trace("skipping empty list property '%s'\n",
-                  rec->key ?: mpr_prop_as_str(masked, 1));
+                  rec->key ? rec->key : mpr_prop_as_str(masked, 1));
             return;
         }
         list = mpr_list_start(list);
@@ -639,9 +639,11 @@ void mpr_tbl_print_record(mpr_tbl_record rec)
 
 void mpr_tbl_print(mpr_tbl t)
 {
+    printf("<table %p with %d records>\n", t, t->count);
     mpr_tbl_record rec = t->rec;
     int i;
     for (i = 0; i < t->count; i++) {
+        printf("  ");
         mpr_tbl_print_record(rec);
         printf("\n");
         ++rec;

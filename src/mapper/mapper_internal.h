@@ -6,6 +6,10 @@
 #include <mapper/mapper.h>
 #include <string.h>
 
+#ifdef _MSC_VER
+#include <malloc.h>
+#endif
+
 /* Structs that refer to things defined in mapper.h are declared here instead
    of in types_internal.h */
 
@@ -20,9 +24,12 @@
 if (!(a)) { trace(__VA_ARGS__); return ret; }
 #define TRACE_DEV_RETURN_UNLESS(a, ret, ...) \
 if (!(a)) { trace_dev(dev, __VA_ARGS__); return ret; }
+#define TRACE_NET_RETURN_UNLESS(a, ret, ...) \
+if (!(a)) { trace_net(__VA_ARGS__); return ret; }
 #else
 #define TRACE_RETURN_UNLESS(a, ret, ...) if (!(a)) { return ret; }
 #define TRACE_DEV_RETURN_UNLESS(a, ret, ...) if (!(a)) { return ret; }
+#define TRACE_NET_RETURN_UNLESS(a, ret, ...) if (!(a)) { return ret; }
 #endif
 
 #if defined(WIN32) || defined(_MSC_VER)
@@ -60,11 +67,11 @@ if (!(a)) { trace_dev(dev, __VA_ARGS__); return ret; }
 #define die_unless(...) {}
 #endif /* DEBUG */
 #else /* !__GNUC__ */
-static void trace(...) {};
-static void trace_graph(...) {};
-static void trace_dev(...) {};
-static void trace_net(...) {};
-static void die_unless(...) {};
+#define trace(...) {};
+#define trace_graph(...) {};
+#define trace_dev(...) {};
+#define trace_net(...) {};
+#define die_unless(...) {};
 #endif /* __GNUC__ */
 
 /**** Subscriptions ****/
@@ -81,7 +88,7 @@ void mpr_obj_increment_version(mpr_obj obj);
 
 void mpr_net_add_dev(mpr_net n, mpr_local_dev d);
 
-void mpr_net_remove_dev_methods(mpr_net n, mpr_local_dev d);
+void mpr_net_remove_dev(mpr_net n, mpr_local_dev d);
 
 void mpr_net_poll(mpr_net n);
 
@@ -170,6 +177,8 @@ mpr_id_map mpr_dev_get_idmap_by_GID(mpr_local_dev dev, int group, mpr_id GID);
 const char *mpr_dev_get_name(mpr_dev dev);
 
 void mpr_dev_send_state(mpr_dev dev, net_msg_t cmd);
+
+int mpr_dev_send_maps(mpr_local_dev dev, mpr_dir dir, int msg);
 
 /*! Find information for a registered link.
  *  \param dev          Device record to query.
@@ -297,6 +306,8 @@ mpr_link mpr_link_new(mpr_local_dev local_dev, mpr_dev remote_dev);
  *  \return             The list of results.  Use mpr_list_next() to iterate. */
 mpr_list mpr_link_get_maps(mpr_link link);
 
+void mpr_link_add_map(mpr_link link, int is_src);
+
 void mpr_link_remove_map(mpr_link link, mpr_local_map rem);
 
 void mpr_link_init(mpr_link link);
@@ -354,7 +365,9 @@ void mpr_slot_free_value(mpr_local_slot slot);
 
 int mpr_slot_set_from_msg(mpr_slot slot, mpr_msg msg);
 
-void mpr_slot_add_props_to_msg(lo_message msg, mpr_slot slot, int is_dest, int staged);
+void mpr_slot_add_props_to_msg(lo_message msg, mpr_slot slot, int is_dest);
+
+void mpr_slot_print(mpr_slot slot, int is_dest);
 
 int mpr_slot_match_full_name(mpr_slot slot, const char *full_name);
 
@@ -424,7 +437,7 @@ void mpr_msg_free(mpr_msg msg);
  *  \param msg      Structure containing parameter info.
  *  \param prop     Symbolic identifier of the property to look for.
  *  \return         Pointer to mpr_msg_atom, or zero if not found. */
-mpr_msg_atom mpr_msg_get_prop(mpr_msg msg, mpr_prop prop);
+mpr_msg_atom mpr_msg_get_prop(mpr_msg msg, int prop);
 
 void mpr_msg_add_typed_val(lo_message msg, int len, mpr_type type, const void *val);
 
@@ -451,11 +464,15 @@ int mpr_expr_get_var_vec_len(mpr_expr expr, int idx);
 
 int mpr_expr_get_var_type(mpr_expr expr, int idx);
 
+int mpr_expr_get_var_is_instanced(mpr_expr expr, int idx);
+
 int mpr_expr_get_src_is_muted(mpr_expr expr, int idx);
 
 const char *mpr_expr_get_var_name(mpr_expr expr, int idx);
 
 int mpr_expr_get_manages_inst(mpr_expr expr);
+
+void mpr_expr_var_updated(mpr_expr expr, int var_idx);
 
 #ifdef DEBUG
 void printexpr(const char*, mpr_expr);
@@ -511,8 +528,8 @@ mpr_tbl_record mpr_tbl_get(mpr_tbl tab, mpr_prop prop, const char *key);
 mpr_prop mpr_tbl_get_prop_by_key(mpr_tbl tab, const char *key, int *len,
                                  mpr_type *type, const void **val, int *pub);
 
-mpr_prop mpr_tbl_get_prop_by_idx(mpr_tbl tab, mpr_prop prop, const char **key,
-                                 int *len, mpr_type *type, const void **val, int *pub);
+mpr_prop mpr_tbl_get_prop_by_idx(mpr_tbl tab, int prop, const char **key, int *len,
+                                 mpr_type *type, const void **val, int *pub);
 
 /*! Remove a key-value pair from a table (by index or name). */
 int mpr_tbl_remove(mpr_tbl tab, mpr_prop prop, const char *key, int flags);
@@ -525,9 +542,9 @@ int mpr_tbl_remove(mpr_tbl tab, mpr_prop prop, const char *key, int flags);
  *  \param type         OSC type of value to add.
  *  \param args         Value(s) to add
  *  \param len          Number of OSC argument in array
- *  \param flags        MPR_LOCAL_MODIFY, MPR_REMOTE_MODIFY, MPR_NON_MODIFABLE.
+ *  \param flags        LOCAL_MODIFY, REMOTE_MODIFY, NON_MODIFABLE.
  *  \return             The number of table values added or modified. */
-int mpr_tbl_set(mpr_tbl tab, mpr_prop prop, const char *key, int len,
+int mpr_tbl_set(mpr_tbl tab, int prop, const char *key, int len,
                 mpr_type type, const void *args, int flags);
 
 /*! Sync an existing value with a table. Records added using this method must
@@ -623,8 +640,8 @@ MPR_INLINE static int mpr_type_get_size(mpr_type type)
 
 /**** Values ****/
 
-void mpr_value_realloc(mpr_value val, int vec_len, mpr_type type,
-                       int mem_len, int num_inst, int is_output);
+void mpr_value_realloc(mpr_value val, unsigned int vec_len, mpr_type type,
+                       unsigned int mem_len, unsigned int num_inst, int is_output);
 
 void mpr_value_reset_inst(mpr_value v, int idx);
 
@@ -635,13 +652,13 @@ void mpr_value_set_samp(mpr_value v, int idx, void *s, mpr_time t);
 /*! Helper to find the pointer to the current value in a mpr_value_t. */
 MPR_INLINE static void* mpr_value_get_samp(mpr_value v, int idx)
 {
-    mpr_value_buffer b = &v->inst[idx];
+    mpr_value_buffer b = &v->inst[idx % v->num_inst];
     return (char*)b->samps + b->pos * v->vlen * mpr_type_get_size(v->type);
 }
 
 MPR_INLINE static void* mpr_value_get_samp_hist(mpr_value v, int inst_idx, int hist_idx)
 {
-    mpr_value_buffer b = &v->inst[inst_idx];
+    mpr_value_buffer b = &v->inst[inst_idx % v->num_inst];
     int idx = (b->pos + v->mlen + hist_idx) % v->mlen;
     if (idx < 0)
         idx += v->mlen;
@@ -651,13 +668,13 @@ MPR_INLINE static void* mpr_value_get_samp_hist(mpr_value v, int inst_idx, int h
 /*! Helper to find the pointer to the current time in a mpr_value_t. */
 MPR_INLINE static mpr_time* mpr_value_get_time(mpr_value v, int idx)
 {
-    mpr_value_buffer b = &v->inst[idx];
+    mpr_value_buffer b = &v->inst[idx % v->num_inst];
     return &b->times[b->pos];
 }
 
 MPR_INLINE static mpr_time* mpr_value_get_time_hist(mpr_value v, int inst_idx, int hist_idx)
 {
-    mpr_value_buffer b = &v->inst[inst_idx];
+    mpr_value_buffer b = &v->inst[inst_idx % v->num_inst];
     int idx = (b->pos + v->mlen + hist_idx) % v->mlen;
     if (idx < 0)
         idx += v->mlen;

@@ -17,6 +17,9 @@
 
 */
 
+#ifndef COMPONENTS_LIBMAPPER_ESP_COMPAT_IDF_INCLUDE_COMPAT_H_
+#define COMPONENTS_LIBMAPPER_ESP_COMPAT_IDF_INCLUDE_COMPAT_H_
+
 const char *gai_strerror(int);
 
 #ifndef EAI_BADFLAGS
@@ -39,10 +42,8 @@ const char *gai_strerror(int);
 #define NI_NUMERICHOST 0x02
 #endif
 
-#ifndef NI_NUMERICSERV
-#define NI_NUMERICSERV 0x08
-#endif
-
 #ifndef PF_UNIX
 #define PF_UNIX AF_UNIX
 #endif
+
+#endif  // COMPONENTS_LIBMAPPER_ESP_COMPAT_IDF_INCLUDE_COMPAT_H_

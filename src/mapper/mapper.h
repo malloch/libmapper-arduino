@@ -8,6 +8,10 @@ extern "C" {
 #include <mapper/mapper_constants.h>
 #include <mapper/mapper_types.h>
 
+#ifdef WIN32
+#define strdup _strdup
+#endif
+
 /*! \mainpage libmapper
 
 This is the API documentation for libmapper, a distributed signal mapping framework.
@@ -40,7 +44,7 @@ int mpr_obj_get_num_props(mpr_obj object, int staged);
 
 /*! Look up a property by index or one of the symbolic identifiers listed in mpr_constants.h.
  *  \param object       The object to check.
- *  \param property     Index or symbolic identifier of the property to retrieve.
+ *  \param index        Index or symbolic identifier of the property to retrieve.
  *  \param key          A pointer to a location to receive the name of the
  *                      property value (Optional, pass 0 to ignore).
  *  \param length       A pointer to a location to receive the vector length of
@@ -52,7 +56,7 @@ int mpr_obj_get_num_props(mpr_obj object, int staged);
  *  \param publish      1 to publish to the distributed graph, 0 for local-only.
  *  \return             Symbolic identifier of the retrieved property, or
  *                      MPR_PROP_UNKNOWN if not found. */
-mpr_prop mpr_obj_get_prop_by_idx(mpr_obj object, mpr_prop property, const char **key, int *length,
+mpr_prop mpr_obj_get_prop_by_idx(mpr_obj object, int index, const char **key, int *length,
                                  mpr_type *type, const void **value, int *publish);
 
 /*! Look up a property by name.
@@ -220,6 +224,16 @@ mpr_list mpr_dev_get_maps(mpr_dev device, mpr_dir direction);
  *  \return             The number of handled messages. May be zero if there was nothing to do. */
 int mpr_dev_poll(mpr_dev device, int block_ms);
 
+/*! Start automatically polling this device for new messages in a separate thread.
+ *  \param device       The device to check messages for.
+ *  \return             Zero if successful, less than zero otherwise. */
+int mpr_dev_start_polling(mpr_dev device);
+
+/*! Stop automatically polling this device for new messages in a separate thread.
+ *  \param device       The device to check messages for.
+ *  \return             Zero if successful, less than zero otherwise. */
+int mpr_dev_stop_polling(mpr_dev device);
+
 /*! Detect whether a device is completely initialized.
  *  \param device       The device to query.
  *  \return             Non-zero if device is completely initialized, i.e., has an allocated
@@ -238,7 +252,7 @@ mpr_time mpr_dev_get_time(mpr_dev device);
  *                      the next occurrence mpr_dev_set_time() or mpr_dev_poll(). */
 void mpr_dev_set_time(mpr_dev device, mpr_time time);
 
-/*! Indicates that all signal values have been updated for a given timestep. This function can be
+/*! Indicate that all signal values have been updated for a given timestep. This function can be
  *  omitted if mpr_dev_poll() is called each sampling timestep instead, however calling
  *  mpr_dev_poll() at a lower rate may be more performant.
  *  \param device       The device to use. */
@@ -553,8 +567,7 @@ mpr_list mpr_list_get_diff(mpr_list list1, mpr_list list2);
  *  \return             A pointer to the object record, or zero if it doesn't exist. */
 mpr_obj mpr_list_get_idx(mpr_list list, unsigned int index);
 
-/*! Given a object record pointer returned from a previous object query, get the
- *  next item in the list.
+/*! Given an object list returned from a previous object query, get the next item.
  *  \param list         The previous object record pointer.
  *  \return             A list of results.  Use mpr_list_get_next() to iterate. */
 mpr_list mpr_list_get_next(mpr_list list);
@@ -564,7 +577,7 @@ mpr_list mpr_list_get_next(mpr_list list);
  *  \return             A list of results.  Use mpr_list_get_next() to iterate. */
 mpr_list mpr_list_get_cpy(mpr_list list);
 
-/*! Given a object record pointer returned from a previous object query,
+/*! Given an object list returned from a previous object query,
  *  indicate that we are done iterating.
  *  \param list         The previous object record pointer. */
 void mpr_list_free(mpr_list list);
@@ -573,6 +586,10 @@ void mpr_list_free(mpr_list list);
  *  \param list         The previous object record pointer.
  *  \return             The number of objects in the list. */
 int mpr_list_get_size(mpr_list list);
+
+/*! Print an object list returned from a previous object query.
+ *  \param list         The previous object record pointer. */
+void mpr_list_print(mpr_list list);
 
 /** @} */ /* end of group Lists */
 
@@ -619,6 +636,16 @@ const char *mpr_graph_get_address(mpr_graph graph);
  *  \param block_ms     The number of milliseconds to block, or 0 for non-blocking behaviour.
  *  \return             The number of handled messages. */
 int mpr_graph_poll(mpr_graph graph, int block_ms);
+
+/*! Start automatically synchonizing a local graph copy in a separate thread.
+ *  \param graph        The graph to update.
+ *  \return             Zero if successful, less than zero otherwise. */
+int mpr_graph_start_polling(mpr_graph graph);
+
+/*! Stop automatically synchonizing a local graph copy in a separate thread.
+ *  \param graph        The graph to update.
+ *  \return             Zero if successful, less than zero otherwise. */
+int mpr_graph_stop_polling(mpr_graph graph);
 
 /*! Free a graph.
  *  \param graph        The graph to free. */
@@ -674,10 +701,10 @@ void *mpr_graph_remove_cb(mpr_graph graph, mpr_graph_handler *handler, const voi
 
 /*! Return a list of objects.
  *  \param graph        The graph to query.
- *  \param types        Bitflags setting the type of information of interest.
- *                      Can be a combination of mpr_type values.
+ *  \param types        Bitflags setting the type of information of interest. Currently restricted
+ *                      to a single object type.
  *  \return             A list of results.  Use mpr_list_get_next() to iterate. */
-mpr_list mpr_graph_get_objs(mpr_graph graph, int types);
+mpr_list mpr_graph_get_list(mpr_graph graph, int types);
 
 /** @} */ /* end of group Graphs */
 

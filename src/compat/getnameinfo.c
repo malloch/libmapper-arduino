@@ -18,6 +18,7 @@
 */
 
 #include <arpa/inet.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <stddef.h>
 #include <stdio.h>

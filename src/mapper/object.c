@@ -43,7 +43,7 @@ mpr_prop mpr_obj_get_prop_by_key(mpr_obj o, const char *s, int *l, mpr_type *t,
     return mpr_tbl_get_prop_by_key(o->props.synced, s, l, t, v, p);
 }
 
-mpr_prop mpr_obj_get_prop_by_idx(mpr_obj o, mpr_prop p, const char **k, int *l,
+mpr_prop mpr_obj_get_prop_by_idx(mpr_obj o, int p, const char **k, int *l,
                                  mpr_type *t, const void **v, int *pub)
 {
     RETURN_ARG_UNLESS(o, 0);
@@ -145,7 +145,7 @@ mpr_prop mpr_obj_set_prop(mpr_obj o, mpr_prop p, const char *s, int len,
     updated = mpr_tbl_set(local ? o->props.synced : o->props.staged, p, s, len, type, val, flags);
     if (updated)
         mpr_obj_increment_version(o);
-    return updated;
+    return updated ? p : MPR_PROP_UNKNOWN;
 }
 
 int mpr_obj_remove_prop(mpr_obj o, mpr_prop p, const char *s)
@@ -161,9 +161,11 @@ int mpr_obj_remove_prop(mpr_obj o, mpr_prop p, const char *s)
         updated = mpr_tbl_remove(o->props.synced, p, s, LOCAL_MODIFY);
     else if (MPR_PROP_EXTRA == p)
         updated = mpr_tbl_set(o->props.staged, p | PROP_REMOVE, s, 0, 0, 0, REMOTE_MODIFY);
+    else
+        trace("Cannot remove static property [%d] '%s'\n", p, s ? s : mpr_prop_as_str(p, 1));
     if (updated)
         mpr_obj_increment_version(o);
-    return 0;
+    return updated ? 1 : 0;
 }
 
 void mpr_obj_push(mpr_obj o)
@@ -175,6 +177,7 @@ void mpr_obj_push(mpr_obj o)
     if (MPR_DEV == o->type) {
         mpr_dev d = (mpr_dev)o;
         if (d->is_local) {
+            RETURN_UNLESS(((mpr_local_dev)d)->registered)
             mpr_net_use_subscribers(n, (mpr_local_dev)d, o->type);
             mpr_dev_send_state(d, MSG_DEV);
         }
@@ -186,6 +189,7 @@ void mpr_obj_push(mpr_obj o)
     else if (o->type & MPR_SIG) {
         mpr_sig s = (mpr_sig)o;
         if (s->is_local) {
+            RETURN_UNLESS(((mpr_local_dev)s->dev)->registered)
             mpr_type type = ((s->dir == MPR_DIR_OUT) ? MPR_SIG_OUT : MPR_SIG_IN);
             mpr_net_use_subscribers(n, (mpr_local_dev)s->dev, type);
             mpr_sig_send_state(s, MSG_SIG);
@@ -200,8 +204,16 @@ void mpr_obj_push(mpr_obj o)
         mpr_net_use_bus(n);
         if (m->status >= MPR_STATUS_ACTIVE)
             mpr_map_send_state(m, -1, MSG_MAP_MOD);
-        else
+        else {
+            int i;
+            mpr_sig s = m->dst->sig;
+            RETURN_UNLESS(!s->is_local || ((mpr_local_dev)s->dev)->registered);
+            for (i = 0; i < m->num_src; i++) {
+                s = m->src[i]->sig;
+                RETURN_UNLESS(!s->is_local || ((mpr_local_dev)s->dev)->registered);
+            }
             mpr_map_send_state(m, -1, MSG_MAP);
+        }
     }
     else {
         trace("mpr_obj_push(): unknown object type %d\n", o->type);
@@ -305,6 +317,13 @@ void mpr_obj_print(mpr_obj o, int staged)
             mpr_prop_print(len, type, val);
             printf(")");
         }
+    }
+    if (MPR_MAP == o->type) {
+        /* also print slot props */
+        mpr_map map = (mpr_map)o;
+        for (i = 0; i < map->num_src; i++)
+            mpr_slot_print(map->src[i], 0);
+        mpr_slot_print(map->dst, 1);
     }
     printf("\n");
 }

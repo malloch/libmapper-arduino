@@ -13,7 +13,8 @@
 
 MPR_INLINE static int _min(int a, int b) { return a < b ? a : b; }
 
-void mpr_value_realloc(mpr_value v, int vlen, mpr_type type, int mlen, int num_inst, int is_input)
+void mpr_value_realloc(mpr_value v, unsigned int vlen, mpr_type type, unsigned int mlen,
+                       unsigned int num_inst, int is_input)
 {
     int i, samp_size;
     mpr_value_buffer_t *b, tmp;
@@ -126,7 +127,7 @@ void mpr_value_reset_inst(mpr_value v, int idx)
 {
     mpr_value_buffer b;
     RETURN_UNLESS(v->inst);
-    b = &v->inst[idx];
+    b = &v->inst[idx % v->num_inst];
     memset(b->samps, 0, v->mlen * v->vlen * mpr_type_get_size(v->type));
     memset(b->times, 0, v->mlen * sizeof(mpr_time));
     if (b->pos >= 0)
@@ -137,7 +138,7 @@ void mpr_value_reset_inst(mpr_value v, int idx)
 
 void mpr_value_set_samp(mpr_value v, int idx, void *s, mpr_time t)
 {
-    mpr_value_buffer b = &v->inst[idx];
+    mpr_value_buffer b = &v->inst[(idx = idx % v->num_inst)];
     if (b->pos < 0)
         ++v->num_active_inst;
     b->pos += 1;
@@ -163,12 +164,14 @@ void mpr_value_free(mpr_value v) {
 #ifdef DEBUG
 static void _value_print(mpr_value v, int inst_idx, int hist_idx) {
     int i;
+    void *s;
+    mpr_time *t;
     if (v->inst[inst_idx].pos < 0) {
         printf("NULL\n");
         return;
     }
-    void *s = mpr_value_get_samp_hist(v, inst_idx, hist_idx);
-    mpr_time *t = mpr_value_get_time_hist(v, inst_idx, hist_idx);
+    s = mpr_value_get_samp_hist(v, inst_idx, hist_idx);
+    t = mpr_value_get_time_hist(v, inst_idx, hist_idx);
     printf("%08x.%08x | ", (*t).sec, (*t).frac);
     if (v->vlen > 1)
         printf("[");
@@ -197,10 +200,11 @@ void mpr_value_print(mpr_value v, int inst_idx) {
 }
 
 void mpr_value_print_hist(mpr_value v, int inst_idx) {
+    int i, hidx;
     RETURN_UNLESS(inst_idx < v->num_inst && v->inst[inst_idx].pos >= 0);
 
     /* if history is full, print from pos+1 -> pos, else print from 0 -> pos */
-    int i, hidx = v->inst[inst_idx].pos * -1;
+    hidx = v->inst[inst_idx].pos * -1;
     for (i = 0; i < v->mlen; i++) {
         printf("%s {%3d} ", hidx ? "  " : "->", hidx);
         _value_print(v, inst_idx, hidx);

@@ -96,11 +96,13 @@ namespace mapper {
         NONE                    = MPR_OP_NONE
     };
 
+    /*! Symbolic identifiers for core object properties. */
     enum class Property
     {
-        CALIBRATING         = MPR_PROP_CALIB,
+        BUNDLE              = MPR_PROP_BUNDLE,
         DEVICE              = MPR_PROP_DEV,
         DIRECTION           = MPR_PROP_DIR,
+        EPHEMERAL           = MPR_PROP_EPHEM,
         EXPRESSION          = MPR_PROP_EXPR,
         HOST                = MPR_PROP_HOST,
         ID                  = MPR_PROP_ID,
@@ -126,7 +128,8 @@ namespace mapper {
         PROTOCOL            = MPR_PROP_PROTOCOL,
         RATE                = MPR_PROP_RATE,
         SCOPE               = MPR_PROP_SCOPE,
-        SIGNALS             = MPR_PROP_SIG,
+        SIGNAL              = MPR_PROP_SIG,
+        /* MPR_PROP_SLOT DELIBERATELY OMITTED */
         STATUS              = MPR_PROP_STATUS,
         STEAL_MODE          = MPR_PROP_STEAL_MODE,
         SYNCED              = MPR_PROP_SYNCED,
@@ -231,9 +234,19 @@ namespace mapper {
 
         List(mpr_list list)
             { _list = list; }
-        /* override copy constructor */
+        /* Copy constructor */
         List(const List& orig)
             { _list = mpr_list_get_cpy(orig._list); }
+        /* Move constructor */
+        List(List&& orig) noexcept
+            { _list = orig._list; orig._list = NULL; }
+        /* Copy assignment operator */
+        List& operator=(const List& orig) noexcept
+            { _list = mpr_list_get_cpy(orig._list); return *this; }
+        /* Move assignment operator */
+        List& operator=(List&& orig) noexcept
+            { _list = orig._list; orig._list = NULL; return *this; }
+
         ~List()
             { mpr_list_free(_list); }
 
@@ -500,14 +513,6 @@ namespace mapper {
             UDP         = MPR_PROTO_UDP,    /*!< Map updates are sent using UDP. */
             TCP         = MPR_PROTO_TCP     /*!< Map updates are sent using TCP. */
         };
-
-        /*! the set of possible voice-stealing modes for instances. */
-        enum class Stealing
-        {
-            NONE    = MPR_STEAL_NONE,       /*!< No stealing will take place. */
-            OLDEST  = MPR_STEAL_OLDEST,     /*!< Steal the oldest instance. */
-            NEWEST  = MPR_STEAL_NEWEST      /*!< Steal the newest instance. */
-        };
     private:
         /* This constructor accepts a between 2 and 10 signal object arguments inclusive. It is
          * delagated to by the variadic template constructor and in turn it calls the vararg
@@ -570,10 +575,11 @@ namespace mapper {
          *                  effect until it has been added to the graph using push(). */
         Map(int num_srcs, signal_type srcs[], int num_dsts, signal_type dsts[]) : Object(NULL)
         {
-            mpr_sig cast_src[num_srcs], cast_dst = dsts[0];
+            mpr_sig *cast_src = (mpr_sig*)malloc(sizeof(mpr_sig) * num_srcs), cast_dst = dsts[0];
             for (int i = 0; i < num_srcs; i++)
                 cast_src[i] = srcs[i];
             _obj = mpr_map_new(num_srcs, cast_src, 1, &cast_dst);
+            free(cast_src);
         }
 
         /*! Create a map between a set of Signals.
@@ -590,10 +596,11 @@ namespace mapper {
                 _obj = 0;
                 return;
             }
-            mpr_sig cast_src[N], cast_dst = dsts.data()[0];
+            mpr_sig *cast_src = (mpr_sig*)malloc(sizeof(mpr_sig) * N), cast_dst = dsts.data()[0];
             for (int i = 0; i < N; i++)
                 cast_src[i] = srcs.data()[i];
             _obj = mpr_map_new(N, cast_src, 1, &cast_dst);
+            free(cast_src);
         }
 
         /*! Create a map between a set of Signals.
@@ -609,10 +616,12 @@ namespace mapper {
                 return;
             }
             int num_srcs = srcs.size();
-            mpr_sig cast_src[num_srcs], cast_dst = dsts.data()[0];
+            mpr_sig *cast_src = (mpr_sig*)malloc(sizeof(mpr_sig) * num_srcs);
+            mpr_sig cast_dst = dsts.data()[0];
             for (int i = 0; i < num_srcs; i++)
                 cast_src[i] = srcs.data()[i];
             _obj = mpr_map_new(num_srcs, cast_src, 1, &cast_dst);
+            free(cast_src);
         }
 
         /*! Return C data structure mpr_map corresponding to this object.
@@ -634,11 +643,6 @@ namespace mapper {
          *  \return         True if map is completely initialized. */
         bool ready() const
             { return mpr_map_get_is_ready(_obj); }
-
-//        /*! Get the scopes property for a this map.
-//         *  \return       A List containing the list of results.  Use List::next() to iterate. */
-//        List<Device> scopes() const
-//            { return List<Device>((void**)mpr_map_scopes(_obj)); }
 
         /*! Add a scope to this Map. Map scopes configure the propagation of Signal updates across
          *  the Map. Changes will not take effect until synchronized with the distributed graph
@@ -705,6 +709,14 @@ namespace mapper {
             INST_OFLW   = MPR_SIG_INST_OFLW,    /*!< No local instances left. */
             UPDATE      = MPR_SIG_UPDATE,       /*!< Instance value has been updated. */
             ALL         = MPR_SIG_ALL
+        };
+
+        /*! the set of possible voice-stealing modes for instances. */
+        enum class Stealing
+        {
+            NONE    = MPR_STEAL_NONE,       /*!< No stealing will take place. */
+            OLDEST  = MPR_STEAL_OLDEST,     /*!< Steal the oldest instance. */
+            NEWEST  = MPR_STEAL_NEWEST      /*!< Steal the newest instance. */
         };
 
         Signal() : Object() {}
@@ -826,7 +838,8 @@ namespace mapper {
             SIG_DBL,
             INST_INT,
             INST_FLT,
-            INST_DBL
+            INST_DBL,
+            INST_EVT
         };
         typedef struct _handler_data {
             union {
@@ -839,6 +852,7 @@ namespace mapper {
                 void (*inst_int)(Signal::Instance&&, Signal::Event, int, Time&&);
                 void (*inst_flt)(Signal::Instance&&, Signal::Event, float, Time&&);
                 void (*inst_dbl)(Signal::Instance&&, Signal::Event, double, Time&&);
+                void (*inst_evt)(Signal::Instance&&, Signal::Event, Time&&);
             } handler;
             enum handler_type type;
         } *handler_data;
@@ -886,6 +900,9 @@ namespace mapper {
                 case INST_DBL:
                     data->handler.inst_dbl(Signal::Instance(sig, inst), Signal::Event(evt),
                                            val ? *(double*)val : 0, Time(time));
+                case INST_EVT:
+                    data->handler.inst_evt(Signal::Instance(sig, inst), Signal::Event(evt),
+                                           Time(time));
                     break;
                 default:
                     return;
@@ -976,6 +993,11 @@ namespace mapper {
             data->type = INST_DBL;
             data->handler.inst_dbl = h;
         }
+        void _set_callback(handler_data data, void (*h)(Signal::Instance&&, Signal::Event, Time&&))
+        {
+            data->type = INST_EVT;
+            data->handler.inst_evt = h;
+        }
     public:
         template <typename H>
         Signal& set_callback(H& h, Signal::Event events = Signal::Event::UPDATE)
@@ -1012,10 +1034,20 @@ namespace mapper {
         }
         Instance instance(Id id)
             { return Instance(_obj, id); }
-        Signal& reserve_instances(int num, mpr_id *ids = 0)
-            { mpr_sig_reserve_inst(_obj, num, ids, 0); RETURN_SELF }
+        Signal& reserve_instances(int num)
+            { mpr_sig_reserve_inst(_obj, num, NULL, NULL); RETURN_SELF }
+        Signal& reserve_instances(int num, mpr_id *ids)
+            { mpr_sig_reserve_inst(_obj, num, ids, NULL); RETURN_SELF }
         Signal& reserve_instances(int num, Id *ids, void **data)
             { mpr_sig_reserve_inst(_obj, num, ids, data); RETURN_SELF }
+
+        Signal& reserve_instance()
+            { mpr_sig_reserve_inst(_obj, 1, NULL, NULL); RETURN_SELF }
+        Signal& reserve_instance(mpr_id id)
+            { mpr_sig_reserve_inst(_obj, 1, &id, NULL); RETURN_SELF }
+        Signal& reserve_instance(mpr_id id, void* data)
+            { mpr_sig_reserve_inst(_obj, 1, &id, &data); RETURN_SELF }
+
         Instance instance(int idx, mpr_status status) const
             { return Instance(_obj, mpr_sig_get_inst_id(_obj, idx, status)); }
         Signal& remove_instance(Instance instance)
@@ -1037,6 +1069,20 @@ namespace mapper {
      *  network, usually sent from an external GUI. */
     class Device : public Object
     {
+    private:
+        void maybe_free() {
+            if (_owned && _obj && decr_refcount() <= 0) {
+                mpr_list sigs = mpr_dev_get_sigs(_obj, MPR_DIR_ANY);
+                while (sigs) {
+                    const void *data = mpr_obj_get_prop_as_ptr((mpr_sig)*sigs, MPR_PROP_DATA, NULL);
+                    if (data)
+                        free((void*)data);
+                    sigs = mpr_list_get_next(sigs);
+                }
+                mpr_dev_free(_obj);
+                free(_refcount_ptr);
+            }
+        }
     public:
         Device() : Object() {}
         /*! Allocate and initialize a Device.
@@ -1057,38 +1103,77 @@ namespace mapper {
             _refcount_ptr = (int*)malloc(sizeof(int));
             *_refcount_ptr = 1;
         }
-        Device(const Device& orig) : Object(orig)
+        /* Copy constructor */
+        Device(const Device& orig) : Object(orig._obj)
         {
             _owned = orig._owned;
             _refcount_ptr = orig._refcount_ptr;
             if (_owned)
                 incr_refcount();
         }
+        /* Move constructor */
+        Device(Device&& orig) noexcept : Object(orig._obj)
+        {
+            _owned = orig._owned;
+            _refcount_ptr = orig._refcount_ptr;
+            orig._obj = NULL;
+            orig._owned = 0;
+            /* do not modify refcount */
+        }
+        /* Copy assignment operator */
+        Device& operator=(const Device& orig) noexcept
+        {
+            maybe_free();
+            _obj = orig._obj;
+            _owned = orig._owned;
+            _refcount_ptr = orig._refcount_ptr;
+            if (_owned)
+                incr_refcount();
+            return *this;
+        }
+        /* Move assignment operator */
+        Device& operator=(Device&& orig) noexcept
+        {
+            maybe_free();
+            _obj = orig._obj;
+            _owned = orig._owned;
+            _refcount_ptr = orig._refcount_ptr;
+            orig._obj = 0;
+            orig._owned = 0;
+            return *this;
+        }
         Device(mpr_dev dev) : Object(dev)
             { _owned = false; }
         ~Device()
-        {
-            if (_owned && _obj && decr_refcount() <= 0) {
-                mpr_list sigs = mpr_dev_get_sigs(_obj, MPR_DIR_ANY);
-                while (sigs) {
-                    const void *data = mpr_obj_get_prop_as_ptr((mpr_sig)*sigs, MPR_PROP_DATA, NULL);
-                    if (data)
-                        free((void*)data);
-                    sigs = mpr_list_get_next(sigs);
-                }
-                mpr_dev_free(_obj);
-                free(_refcount_ptr);
-            }
-        }
+            { maybe_free(); }
         operator mpr_dev() const
             { return _obj; }
 
+        /*! Add a Signal to this Device.
+         *  \param dir      Directionality of the signal to create. Must be either
+         *                  Direction::INCOMING or Direction::OUTGOING.
+         *  \param name     A descriptive name for the signal.
+         *  \param len      Vector length for the signal.
+         *  \param type     Data type for the signal (INT32, FLOAT, or DOUBLE).
+         *  \param unit     Descriptive unit for the signal (optional).
+         *  \param min      Minimum value for the signal (optional). Must point to an array of
+         *                  length and type specified by the len and type arguments.
+         *  \param max      maximum value for the signal (optional). Must point to an array of
+         *                  length and type specified by the len and type arguments.
+         *  \param num_inst The number of instances to be allocated for the signal. For singleton
+         *                  (non-instanced) signals pass NULL for this argument, otherwise provide
+         *                  the number of instances to pre-allocate. Additional instances may be
+         *                  allocated later using Signal::reserve_instances().
+         *  \return         A newly allocated Signal. */
         Signal add_signal(Direction dir, const str_type &name, int len, Type type,
                           const str_type &unit=0, void *min=0, void *max=0, int *num_inst=0)
         {
             return Signal(_obj, static_cast<mpr_dir>(dir), name, len, static_cast<mpr_type>(type),
                           unit, min, max, num_inst);
         }
+        /*! Remove and destroy a Signal from this Device.
+         *  \param sig      The signal to remove.
+         *  \return         Self. */
         Device& remove_signal(Signal& sig)
         {
             sig.set_callback();
@@ -1096,21 +1181,61 @@ namespace mapper {
             RETURN_SELF
         }
 
+        /*! Get a list of Signals belonging to this Device.
+         *  \param dir      The directionality of the Signals to include in the list. Use
+         *                  Direction::ANY to include all Signals.
+         *  \return         A List of Signals. */
         List<Signal> signals(Direction dir = Direction::ANY) const
             { return List<Signal>(mpr_dev_get_sigs(_obj, static_cast<mpr_dir>(dir))); }
 
+        /*! Get a list of Maps involving this Device.
+         *  \param dir      The directionality of the Maps (with reference to the Device) to
+         *                  include in the list. Use Direction::ANY to include all Maps.
+         *  \return         A List of Maps. */
         List<Map> maps(Direction dir = Direction::ANY) const
             { return List<Map>(mpr_dev_get_maps(_obj, static_cast<mpr_dir>(dir))); }
 
+        /*! Poll this device for new messages.  Note, if you have multiple devices, the right thing
+         *  to do is call this function for each of them with block_ms=0, and add your own sleep if
+         *  necessary.
+         *  \param block_ms     The number of milliseconds to block, or 0 for non-blocking behavior.
+         *  \return             The number of handled messages. */
         int poll(int block_ms=0) const
             { return mpr_dev_poll(_obj, block_ms); }
 
+        /*! Start automatically polling this Device for new messages in a separate thread.
+         *  \return   Self. */
+        Device& start()
+            { mpr_dev_start_polling(_obj); RETURN_SELF }
+
+        /*! Stop automatically polling this Device for new messages in a separate thread.
+         *  \return   Self. */
+        Device& stop()
+            { mpr_dev_stop_polling(_obj); RETURN_SELF }
+
+        /*! Detect whether a device is completely initialized.
+         *  \return         Non-zero if device is completely initialized, i.e., has an allocated
+         *                  receiving port and unique identifier. Zero otherwise. */
         bool ready() const
             { return mpr_dev_get_is_ready(_obj); }
+
+        /*! Get the current time for a device.
+         *  \return         The current time. */
         Time get_time()
             { return mpr_dev_get_time(_obj); }
+
+        /*! Set the time for a device. Use only if user code has access to a more accurate
+         *  timestamp than the operating system.
+         *  \param time     The time to set. This time will be used for tagging signal updates until
+         *                  the next occurrence mpr_dev_set_time() or mpr_dev_poll().
+         *  \return   Self. */
         Device& set_time(Time time)
             { mpr_dev_set_time(_obj, *time); RETURN_SELF }
+
+        /*! Indicate that all signal values have been updated for a given timestep. This function
+         *  can be omitted if poll() is called each sampling timestep, however calling poll() at a
+         *  lower rate may be more performant.
+         *  \return   Self. */
         Device& update_maps()
             { mpr_dev_update_maps(_obj); RETURN_SELF }
 
@@ -1213,6 +1338,12 @@ namespace mapper {
             data->handler.map = h;
             return MPR_MAP;
         }
+        void maybe_free() {
+            if (_owned && _obj && decr_refcount() <= 0) {
+                mpr_graph_free(_obj);
+                free(_refcount_ptr);
+            }
+        }
     public:
         /*! Create a peer in the libmapper distributed graph.
          *  \param types    Sets whether the graph should automatically subscribe to information
@@ -1225,13 +1356,43 @@ namespace mapper {
             _refcount_ptr = (int*)malloc(sizeof(int));
             *_refcount_ptr = 1;
         }
-        Graph(const Graph& orig)
+        Graph(const Graph& orig) : Object(orig._obj)
         {
+            _owned = orig._owned;
+            _refcount_ptr = orig._refcount_ptr;
+            if (_owned)
+                incr_refcount();
+        }
+        /* Move constructor */
+        Graph(Graph&& orig) noexcept : Object(orig._obj)
+        {
+            _owned = orig._owned;
+            _refcount_ptr = orig._refcount_ptr;
+            orig._obj = NULL;
+            orig._owned = 0;
+            /* do not modify refcount */
+        }
+        /* Copy assignment operator */
+        Graph& operator=(const Graph& orig) noexcept
+        {
+            maybe_free();
             _obj = orig._obj;
             _owned = orig._owned;
             _refcount_ptr = orig._refcount_ptr;
             if (_owned)
                 incr_refcount();
+            return *this;
+        }
+        /* Move assignment operator */
+        Graph& operator=(Graph&& orig) noexcept
+        {
+            maybe_free();
+            _obj = orig._obj;
+            _owned = orig._owned;
+            _refcount_ptr = orig._refcount_ptr;
+            orig._obj = 0;
+            orig._owned = 0;
+            return *this;
         }
         Graph(mpr_graph graph)
         {
@@ -1240,12 +1401,7 @@ namespace mapper {
             _refcount_ptr = 0;
         }
         ~Graph()
-        {
-            if (_owned && _obj && decr_refcount() <= 0) {
-                mpr_graph_free(_obj);
-                free(_refcount_ptr);
-            }
-        }
+            { maybe_free(); }
         operator mpr_graph() const
             { return _obj; }
 
@@ -1275,11 +1431,21 @@ namespace mapper {
         std::string address() const
             { return std::string(mpr_graph_get_address(_obj)); }
 
-        /*! Update a Graph.
+        /*! Synchonize a Graph object with the distributed graph.
          *  \param block_ms     The number of milliseconds to block, or 0 for non-blocking behavior.
          *  \return             The number of handled messages. */
         int poll(int block_ms=0) const
             { return mpr_graph_poll(_obj, block_ms); }
+
+        /*! Start automatically synchonizing a Graph object in a separate thread.
+         *  \return   Self. */
+        Graph& start()
+            { mpr_graph_start_polling(_obj); RETURN_SELF }
+
+        /*! Stop automatically synchonizing a Graph object in a separate thread.
+         *  \return   Self. */
+        Graph& stop()
+            { mpr_graph_stop_polling(_obj); RETURN_SELF }
 
         // subscriptions
         /*! Subscribe to information about a specific Device.
@@ -1345,15 +1511,15 @@ namespace mapper {
 
         // graph devices
         List<Device> devices() const
-            { return List<Device>(mpr_graph_get_objs(_obj, MPR_DEV)); }
+            { return List<Device>(mpr_graph_get_list(_obj, MPR_DEV)); }
 
         // graph signals
         List<Signal> signals() const
-            { return List<Signal>(mpr_graph_get_objs(_obj, MPR_SIG)); }
+            { return List<Signal>(mpr_graph_get_list(_obj, MPR_SIG)); }
 
         // graph maps
         List<Map> maps() const
-            { return List<Map>(mpr_graph_get_objs(_obj, MPR_MAP)); }
+            { return List<Map>(mpr_graph_get_list(_obj, MPR_MAP)); }
 
         OBJ_METHODS(Graph);
     };
@@ -1710,7 +1876,7 @@ namespace mapper {
             { _set(static_cast<int>(loc)); }
         void _set(Map::Protocol proto)
             { _set(static_cast<int>(proto)); }
-        void _set(Map::Stealing stl)
+        void _set(Signal::Stealing stl)
             { _set(static_cast<int>(stl)); }
     };
 

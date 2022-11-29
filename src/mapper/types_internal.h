@@ -19,8 +19,10 @@
 #ifdef HAVE_INTTYPES_H
 #include <inttypes.h>
 #define PR_MPR_ID PRIu64
+#define PR_MPR_INT64 PRIi64
 #else
 #define PR_MPR_ID "llu"
+#define PR_MPR_INT64 "lld"
 #endif
 
 /**** Defined in mapper.h ****/
@@ -143,7 +145,7 @@ typedef struct _mpr_net {
     int num_devs;
     uint32_t next_bus_ping;
     uint32_t next_sub_ping;
-    uint8_t graph_methods_added;
+    uint8_t generic_dev_methods_added;
 } mpr_net_t, *mpr_net;
 
 /**** Messages ****/
@@ -220,6 +222,21 @@ typedef struct _mpr_subscriber {
 
 #define TIMEOUT_SEC 10              /* timeout after 10 seconds without ping */
 
+/**** Thread handling ****/
+
+typedef struct _mpr_thread_data {
+    void *object;
+#ifdef HAVE_LIBPTHREAD
+    pthread_t thread;
+#else
+#ifdef HAVE_WIN32_THREADS
+    HANDLE thread;
+#endif
+#endif
+    volatile int is_active;
+    volatile int is_done;
+} mpr_thread_data_t, *mpr_thread_data;
+
 /**** Object ****/
 
 typedef struct _mpr_obj
@@ -243,6 +260,8 @@ typedef struct _mpr_graph {
 
     /*! Linked-list of autorenewing device subscriptions. */
     mpr_subscription subscriptions;
+
+    mpr_thread_data thread_data;
 
     /*! Flags indicating whether information on signals and mappings should
      *  be automatically subscribed to when a new device is seen.*/
@@ -275,7 +294,7 @@ typedef struct _mpr_value
     uint8_t num_inst;           /*!< Number of instances. */
     uint8_t num_active_inst;    /*!< Number of active instances. */
     mpr_type type;              /*!< The type of this signal. */
-    int8_t mlen;                /*!< History size of the buffer. */
+    int16_t mlen;               /*!< History size of the buffer. */
 } mpr_value_t, *mpr_value;
 
 /*! Bit flags for indicating instance id_map status. */
@@ -326,8 +345,9 @@ typedef struct _mpr_sig_idmap
     float jitter;               /*!< Estimate of the timing jitter of this signal. */   \
     int dir;                    /*!< DIR_OUTGOING / DIR_INCOMING / DIR_BOTH */          \
     int len;                    /*!< Length of the signal vector, or 1 for scalars. */  \
+    int use_inst;               /*!< 1 if signal uses instances, 0 otherwise. */        \
     int num_inst;               /*!< Number of instances. */                            \
-    int use_inst;               /*!< 1 if using instances, 0 otherwise. */              \
+    int ephemeral;              /*!< 1 if signal is ephemeral, 0 otherwise. */          \
     int num_maps_in;            /* TODO: use dynamic query instead? */                  \
     int num_maps_out;           /* TODO: use dynamic query instead? */                  \
     mpr_steal_type steal_mode;  /*!< Type of voice stealing to perform. */              \
@@ -377,13 +397,15 @@ typedef struct _mpr_bundle {
 typedef struct _mpr_link {
     mpr_obj_t obj;                  /* always first */
     mpr_dev devs[2];
-    int *num_maps;
+    int num_maps[2];
 
     struct {
         lo_address admin;               /*!< Network address of remote endpoint */
         lo_address udp;                 /*!< Network address of remote endpoint */
         lo_address tcp;                 /*!< Network address of remote endpoint */
     } addr;
+
+    int is_local_only;
 
     mpr_bundle_t bundles[NUM_BUNDLES];  /*!< Circular buffer to handle interrupts during poll() */
 
@@ -431,7 +453,8 @@ typedef struct _mpr_local_slot {
     int status;                                                                 \
     int protocol;                   /*!< Data transport protocol. */            \
     int use_inst;                   /*!< 1 if using instances, 0 otherwise. */  \
-    int is_local;
+    int is_local;                                                               \
+    int bundle;
 
 /*! A record that describes the properties of a mapping.
  *  @ingroup map */
@@ -477,6 +500,8 @@ typedef struct _mpr_rtr_sig {
 
 /*! The router structure. */
 typedef struct _mpr_rtr {
+    mpr_net net;
+    /* TODO: rtr should either be stored in local_dev or shared */
     struct _mpr_local_dev *dev;     /*!< The device associated with this link. */
     mpr_rtr_sig sigs;               /*!< The list of mappings for each signal. */
 } mpr_rtr_t, *mpr_rtr;
@@ -531,6 +556,7 @@ struct _mpr_local_dev {
     } idmaps;
 
     mpr_expr_stack expr_stack;
+    mpr_thread_data thread_data;
 
     mpr_time time;
     int num_sig_groups;
@@ -569,7 +595,7 @@ typedef struct _mpr_msg_atom
     lo_arg **vals;
     const char *types;
     int len;
-    mpr_prop prop;
+    int prop;
 } mpr_msg_atom_t, *mpr_msg_atom;
 
 typedef struct _mpr_msg

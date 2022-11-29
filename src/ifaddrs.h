@@ -1,5 +1,24 @@
-#ifndef IF_ADDRS_H_
-#define IF_ADDRS_H_
+/*
+ libmapper-esp
+ Copyright (C) 2020 Mathias Bredholt
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+*/
+
+#ifndef COMPONENTS_LIBMAPPER_ESP_COMPAT_IDF_INCLUDE_IFADDRS_H_
+#define COMPONENTS_LIBMAPPER_ESP_COMPAT_IDF_INCLUDE_IFADDRS_H_
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -38,4 +57,4 @@ int getifaddrs(struct ifaddrs **ifap);
 
 void freeifaddrs(struct ifaddrs *ifa);
 
-#endif
+#endif  // COMPONENTS_LIBMAPPER_ESP_COMPAT_IDF_INCLUDE_IFADDRS_H_

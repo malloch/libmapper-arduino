@@ -16,7 +16,7 @@ mkdir -p tmp
 cd tmp
 
 # libmapper
-git clone https://github.com/mathiasbredholt/libmapper.git
+git clone https://github.com/libmapper/libmapper.git
 cd libmapper
 ./autogen.sh
 mkdir -p ../../src/mapper
@@ -27,6 +27,11 @@ for i in src/*.c; do sed -i $SEDOPTION '1i\
 cp src/*.c ../../src/mapper
 cp src/*.h ../../src/mapper
 cp include/mapper/*.h ../../src/mapper
+mkdir -p ../../src/mapper/util
+cp src/util/*.c ../../src/mapper/util
+cp src/util/*.h ../../src/mapper/util
+mkdir -p ../../src/mapper/expression
+cp src/expression/*.h ../../src/mapper/expression
 cd ..
 rm -rf libmapper
 

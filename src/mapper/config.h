@@ -37,11 +37,11 @@
 /* Define to use lo_bundle_count function in liblo. */
 #define HAVE_LIBLO_BUNDLE_COUNT /**/
 
-/* Define to use lo_servers_recv_noblock function in liblo. */
-#define HAVE_LIBLO_SERVERS_RECV_NOBLOCK /**/
-
 /* Define to use lo_server_new_multicast_iface function in liblo. */
 #define HAVE_LIBLO_SERVER_IFACE /**/
+
+/* Define to use lo_server_new_from_config function in liblo. */
+#define HAVE_LIBLO_SERVER_NEW_FROM_CONFIG /**/
 
 /* Define to use lo_address_set_iface function in liblo. */
 #define HAVE_LIBLO_SET_IFACE /**/
@@ -49,7 +49,7 @@
 /* Define to use the pthread library for threading. */
 #define HAVE_LIBPTHREAD 1
 
-/* Define to 1 if you have the `z' library (-lz). */
+/* Define to 1 if you have the 'z' library (-lz). */
 #define HAVE_LIBZ 1
 
 /* Define to 1 if you have the <stdint.h> header file. */
@@ -104,7 +104,7 @@
 #define PACKAGE_NAME "libmapper"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "libmapper 1.2.552+gc906c0e5"
+#define PACKAGE_STRING "libmapper 2.4.12"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "libmapper"
@@ -113,18 +113,18 @@
 #define PACKAGE_URL "http://libmapper.org"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "1.2.552+gc906c0e5"
+#define PACKAGE_VERSION "2.4.12"
 
-/* Define to 1 if all of the C90 standard headers exist (not just the ones
+/* Define to 1 if all of the C89 standard headers exist (not just the ones
    required in a freestanding environment). This macro is provided for
    backward compatibility; new code need not use it. */
 #define STDC_HEADERS 1
 
 /* Version number of package */
-#define VERSION "1.2.552+gc906c0e5"
+#define VERSION "2.4.12"
 
-/* Define to empty if `const' does not conform to ANSI C. */
+/* Define to empty if 'const' does not conform to ANSI C. */
 /* #undef const */
 
-/* Define to `unsigned int' if <sys/types.h> does not define. */
+/* Define as 'unsigned int' if <stddef.h> doesn't define. */
 /* #undef size_t */

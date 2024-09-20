@@ -1,12 +1,15 @@
 #include <compat.h>
-#include <ctype.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stddef.h>
 
-#include "mapper_internal.h"
+#include "object.h"
+#include "path.h"
+#include "property.h"
+#include "util/mpr_debug.h"
+#include <mapper/mapper.h>
 
 /*   Note on the trick used here: Presuming that we can have lists as the result
  * of a search query, we need to be able to return a linked list composed of
@@ -39,8 +42,11 @@ typedef struct {
     void *self;
     void **start;
     struct _query_info *query_ctx;
-    query_type_t query_type;
-    int data[1]; /* stub */
+    union {
+        query_type_t query_type;
+        void *pad;
+    };
+    int *data; /* stub */
 }  mpr_list_header_t;
 
 /*! Function for query comparison */
@@ -55,12 +61,14 @@ static int cmp_parallel_query(const void *ctx_data, const void *dev);
 /*! Contains some function pointers and data for handling query context. */
 typedef struct _query_info {
     unsigned int size;
+    int16_t index_offset;
+    uint16_t reset;
     query_compare_func_t *query_compare;
     query_free_func_t *query_free;
     int *data; /* stub */
 } query_info_t;
 
-#define LIST_HEADER_SIZE (sizeof(mpr_list_header_t)-sizeof(int[1]))
+#define LIST_HEADER_SIZE (sizeof(mpr_list_header_t)-sizeof(int*))
 
 /*! Reserve memory for a list item.  Reserves an extra pointer at the
  *  beginning of the structure to allow for a list pointer. */
@@ -70,8 +78,7 @@ static mpr_list_header_t* mpr_list_new_item(size_t size)
 
     /* make sure the compiler is doing what we think it's doing with
      * the size of mpr_list_header_t and location of data */
-    die_unless(LIST_HEADER_SIZE == sizeof(void*)*4 + sizeof(query_type_t),
-               "unexpected size for mpr_list_header_t");
+    die_unless(LIST_HEADER_SIZE == sizeof(void*) * 5, "unexpected size for mpr_list_header_t");
     die_unless(LIST_HEADER_SIZE == ((char*)&lh->data - (char*)lh),
                "unexpected offset for data in mpr_list_header_t");
 
@@ -120,17 +127,37 @@ static void* mpr_list_get_next_internal(void *mem)
 }
 
 /*! Prepend an item to the beginning of a list. */
-static void *mpr_list_prepend_item(void *item, void **list)
+static void *mpr_list_prepend_item(void **list, void *item)
 {
     mpr_list_set_next(item, *list);
     *list = item;
     return item;
 }
 
-void *mpr_list_add_item(void **list, size_t size)
+/*! Append an item to the end of a list. */
+static void *mpr_list_append_item(void **list, void *item)
+{
+    if (*list) {
+        void *last_item, *node = *list;
+        while (node) {
+            last_item = node;
+            node = mpr_list_get_next_internal(node);
+        }
+        mpr_list_set_next(last_item, item);
+    }
+    else {
+        *list = item;
+    }
+    return item;
+}
+
+void *mpr_list_add_item(void **list, size_t size, int prepend)
 {
     mpr_list_header_t* lh = mpr_list_new_item(size);
-    mpr_list_prepend_item(lh, list);
+    if (prepend)
+        mpr_list_prepend_item(list, lh);
+    else
+        mpr_list_append_item(list, lh);
     return lh;
 }
 
@@ -166,10 +193,23 @@ void mpr_list_free_item(void *item)
 
 void **mpr_list_query_continuation(mpr_list_header_t *lh)
 {
-    void *item = mpr_list_header_by_data(lh->self)->next;
+    void *item;
+    if (lh->query_ctx->reset) {
+        item = mpr_list_header_by_data(*lh->start)->self;
+        lh->query_ctx->reset = 0;
+    }
+    else {
+        item = mpr_list_header_by_data(lh->self)->next;
+    }
     while (item) {
-        if (lh->query_ctx->query_compare(&lh->query_ctx->data, item))
+        int res = lh->query_ctx->query_compare(&lh->query_ctx->data, item);
+        if (res) {
+            if (2 == res) {
+                /* Mark list as reset */
+                lh->query_ctx->reset = 1;
+            }
             break;
+        }
         item = mpr_list_get_next_internal(item);
     }
 
@@ -199,15 +239,17 @@ static void free_query_single_ctx(mpr_list_header_t *lh)
 }
 
 #define GET_TYPE_SIZE(TYPE) \
-va_arg(aq, TYPE);           \
+va_arg(aq_copy, TYPE);      \
 size += sizeof(TYPE);
 
-static int get_query_size(const char *types, va_list aq)
+static int get_query_size(const char *types, va_list *aq)
 {
     int i = 0, size = 0;
-    RETURN_ARG_UNLESS(types, 0);
+    va_list aq_copy;
+    va_copy(aq_copy, *aq);
     while (types[i]) {
         switch (types[i]) {
+            case 'x':      /* query index for ordered lists */
             case MPR_INT32:
             case MPR_TYPE: /* store as int to avoid alignment problems */
                 GET_TYPE_SIZE(int);
@@ -219,15 +261,17 @@ static int get_query_size(const char *types, va_list aq)
                 GET_TYPE_SIZE(void*);
                 break;
             case MPR_STR: {
-                const char *val = va_arg(aq, const char*);
+                const char *val = va_arg(aq_copy, const char*);
                 size += (val ? strlen(val) : 0) + 1;
                 break;
             }
             default:
+                va_end(aq_copy);
                 return 0;
         }
         ++i;
     };
+    va_end(aq_copy);
     return size;
 }
 
@@ -240,19 +284,23 @@ static int get_query_size(const char *types, va_list aq)
 
 /* We need to be careful of memory alignment here - for now we will just ensure
  * that string arguments are always passed last. */
-static void **new_query_internal(const void **list, int size, const void *func,
-                                 const char *types, va_list aq)
+mpr_list vmpr_list_new_query(const void **list, const void *func, const char *types, va_list aq)
 {
     mpr_list_header_t *lh;
-    int offset = 0, i = 0;
+    int offset = 0, i = 0, size = 0;
     char *data;
-    RETURN_ARG_UNLESS(list && size && func && types, 0);
+    RETURN_ARG_UNLESS(list && func && types, 0);
+
+    size = get_query_size(types, (va_list*)&aq);
+
     lh = (mpr_list_header_t*)malloc(LIST_HEADER_SIZE);
     lh->next = (void*)mpr_list_query_continuation;
     lh->query_type = QUERY_DYNAMIC;
-    lh->query_ctx = (query_info_t*)malloc(sizeof(query_info_t)+size);
+    lh->query_ctx = (query_info_t*)malloc(sizeof(query_info_t) + size);
+    lh->query_ctx->index_offset = -1;
 
     data = (char*)&lh->query_ctx->data;
+    i = 0;
     while (types[i]) {
         switch (types[i]) {
             case MPR_INT32:
@@ -274,6 +322,12 @@ static void **new_query_internal(const void **list, int size, const void *func,
                 offset += (val ? strlen(val) : 0) + 1;
                 break;
             }
+            case 'x':      /* query index for ordered lists */
+                if (-1 == lh->query_ctx->index_offset) {
+                    lh->query_ctx->index_offset = offset;
+                    break;
+                }
+                trace("error: only one query index permitted.\n")
             default:
                 free(lh->query_ctx);
                 free(lh);
@@ -283,25 +337,20 @@ static void **new_query_internal(const void **list, int size, const void *func,
     }
 
     lh->query_ctx->size = sizeof(query_info_t) + size;
+    lh->query_ctx->reset = 0;
     lh->query_ctx->query_compare = (query_compare_func_t*)func;
     lh->query_ctx->query_free = (query_free_func_t*)free_query_single_ctx;
     lh->start = (void**)list;
     lh->self = *lh->start;
-    return &lh->self;
+    return (mpr_list)&lh->self;
 }
 
-mpr_list mpr_list_new_query(const void **list, const void *func,
-                            const char *types, ...)
+mpr_list mpr_list_new_query(const void **list, const void *func, const char *types, ...)
 {
-    int size;
     va_list aq;
     mpr_list qry;
     va_start(aq, types);
-    size = get_query_size(types, aq);
-    va_end(aq);
-
-    va_start(aq, types);
-    qry = (mpr_list)new_query_internal(list, size, func, types, aq);
+    qry = (mpr_list)vmpr_list_new_query(list, func, types, aq);
     va_end(aq);
     return qry;
 }
@@ -312,12 +361,27 @@ mpr_list mpr_list_start(mpr_list list)
     RETURN_ARG_UNLESS(list, 0);
     lh = mpr_list_header_by_self(list);
     lh->self = *lh->start;
+
+    /* Reset query index to zero (if it exists). Used for ordered lists. */
+    if (lh->query_ctx->index_offset >= 0) {
+        int *idx = (int*)((char*)&lh->query_ctx->data + lh->query_ctx->index_offset);
+        *idx = 0;
+    }
+    lh->query_ctx->reset = 0;
     if (QUERY_DYNAMIC == lh->query_type) {
+        int res;
         if (!*list)
             return 0;
-        if (lh->query_ctx->query_compare(&lh->query_ctx->data, *list))
-            return (mpr_list)&lh->self;
-        return (mpr_list)mpr_list_query_continuation(lh);
+        res = lh->query_ctx->query_compare(&lh->query_ctx->data, *list);
+        switch (res) {
+            case 2:
+                /* Mark list as reset */
+                lh->query_ctx->reset = 1;
+            case 1:
+                return (mpr_list)&lh->self;
+            default:
+                return (mpr_list)mpr_list_query_continuation(lh);
+        }
     }
     else
         return (mpr_list)&lh->self;
@@ -390,6 +454,12 @@ static int cmp_parallel_query(const void *ctx_data, const void *list)
 
     int res1 = c1->query_compare(&c1->data, list);
     int res2 = c2->query_compare(&c2->data, list);
+
+    if (2 == res1)
+        c1->reset = 1;
+    if (2 == res2)
+        c2->reset = 1;
+
     switch (op) {
         case OP_UNION:          return res1 || res2;
         case OP_INTERSECTION:   return res1 && res2;
@@ -452,36 +522,75 @@ mpr_list mpr_list_get_isect(mpr_list list1, mpr_list list2)
                                              "vvi", &lh1, &lh2, OP_INTERSECTION));
 }
 
-#define COMPARE_TYPE(TYPE)                      \
-for (i = 0; i < len; i++) {                     \
-    comp += ((TYPE*)v1)[i] > ((TYPE*)v2)[i];    \
-    comp -= ((TYPE*)v1)[i] < ((TYPE*)v2)[i];    \
-    diff += abs(comp);                          \
+#define COMPARE_TYPE(TYPE)                  \
+for (i = 0, j = 0; i < _l1; i++, j++) {     \
+    if (j >= _l2)                           \
+        j = 0;                              \
+    eq += ((TYPE*)v1)[i] == ((TYPE*)v2)[j]; \
+    gt += ((TYPE*)v1)[i] > ((TYPE*)v2)[j];  \
+    lt += ((TYPE*)v1)[i] < ((TYPE*)v2)[j];  \
 }
 
-static int compare_val(mpr_op op, int len, mpr_type type, const void *v1, const void *v2)
+static int compare_val(mpr_op op, mpr_type type, int l1, int l2, const void *v1, const void *v2)
 {
-    int i, comp = 0, diff = 0;
+    unsigned int eq = 0, gt = 0, lt = 0;
+    uint8_t i, j, and = 0, or = 0, _l1 = l1, _l2 = l2;
+    register int ret;
+
+    if (op & (MPR_OP_ANY | MPR_OP_NONE)) {
+        _l2 = 1;
+    }
+    else {
+        /* Use minimum length */
+        _l1 = l1 < l2 ? l1 : l2;
+    }
+
     switch (type) {
-        case MPR_STR:
-            if (1 == len)
-                comp = match_pattern((const char*)v1, (const char*)v2);
-            else {
-                for (i = 0; i < len; i++) {
-                    comp += match_pattern(((const char**)v1)[i], ((const char**)v2)[i]);
-                    diff += abs(comp);
-                }
+        case MPR_STR: {
+            for (i = 0, j = 0; i < _l1; i++, j++) {
+                int comp;
+                const char *s1, *s2;
+                if (j >= _l2)
+                    j = 0;
+                s1 = (1 == l1) ? (const char*)v1 : ((const char**)v1)[i];
+                s2 = (1 == l2) ? (const char*)v2 : ((const char**)v2)[j];
+                comp = mpr_path_match(s1, s2);
+                if (comp == 0)
+                    ++eq;
+                if (comp < 0)
+                    ++lt;
+                if (comp > 0)
+                    ++gt;
             }
             break;
+        }
         case MPR_BOOL:
-            for (i = 0; i < len; i++) {
-                int j = ((int*)v1)[i] != 0, k = ((int*)v2)[i] != 0;
-                comp += j - k;
-                diff += abs(comp);
+            for (i = 0, j = 0; i < _l1; i++, j++) {
+                uint8_t b1, b2;
+                int comp;
+                if (j >= _l2)
+                    j = 0;
+                b1 = ((int*)v1)[i] != 0;
+                b2 = ((int*)v2)[j] != 0;
+                comp = b1 - b2;
+                if (comp == 0)
+                    ++eq;
+                if (comp < 0)
+                    ++lt;
+                if (comp > 0)
+                    ++gt;
+                and |= (b1 && b2);
+                or |= (b1 || b2);
             }
             break;
         case MPR_INT32:
             COMPARE_TYPE(int);
+            for (i = 0, j = 0; i < _l1; i++, j++) {
+                if (j >= _l2)
+                    j = 0;
+                and |= (((int*)v1)[i] & ((int*)v2)[j]);
+                or |= (((int*)v1)[i] | ((int*)v2)[j]);
+            }
             break;
         case MPR_FLT:
             COMPARE_TYPE(float);
@@ -495,32 +604,82 @@ static int compare_val(mpr_op op, int len, mpr_type type, const void *v1, const 
         case MPR_INT64:
         case MPR_TIME:
             COMPARE_TYPE(uint64_t);
+            for (i = 0, j = 0; i < _l1; i++, j++) {
+                if (j >= _l2)
+                    j = 0;
+                and |= (((uint64_t*)v1)[i] & ((uint64_t*)v2)[j]);
+                or |= (((uint64_t*)v1)[i] | ((uint64_t*)v2)[j]);
+            }
             break;
         case MPR_PTR:
+            for (i = 0, j = 0; i < _l1; i++, j++) {
+                int comp;
+                void *p1, *p2;
+                if (j >= _l2)
+                    j = 0;
+                p1 = (1 == l1) ? (void*)v1 : ((void**)v1)[i];
+                p2 = ((void**)v2)[j];
+                comp = (p1 > p2) - (p1 < p2);
+                if (comp == 0)
+                    ++eq;
+                if (comp < 0)
+                    ++lt;
+                if (comp > 0)
+                    ++gt;
+            }
+            break;
         case MPR_DEV:
         case MPR_SIG:
         case MPR_MAP:
         case MPR_OBJ:
-            if (1 == len) {
-                v2 = *(void**)v2;
-                comp = ((void*)v1 > (void*)v2) - ((void*)v1 < (void*)v2);
-            }
-            else {
-                COMPARE_TYPE(void**);
+            for (i = 0, j = 0; i < _l1; i++, j++) {
+                mpr_id comp;
+                mpr_id id1, id2;
+                if (j >= _l2)
+                    j = 0;
+                id1 = (1 == l1) ? mpr_obj_get_id((mpr_obj)v1) : mpr_obj_get_id((mpr_obj)((void**)v1)[i]);
+                id2 = mpr_obj_get_id((mpr_obj)((void**)v2)[j]);
+                comp = id1 - id2;
+                if (comp == 0)
+                    ++eq;
+                if (comp < 0)
+                    ++lt;
+                if (comp > 0)
+                    ++gt;
             }
             break;
         default:
             return 0;
     }
-    switch (op) {
-        case MPR_OP_EQ:     return (0 == comp) && !diff;
-        case MPR_OP_GT:     return comp > 0;
-        case MPR_OP_GTE:    return comp >= 0;
-        case MPR_OP_LT:     return comp < 0;
-        case MPR_OP_LTE:    return comp <= 0;
-        case MPR_OP_NEQ:    return comp != 0 || diff;
-        default:            return 0;
+    if (op & (MPR_OP_ANY | MPR_OP_NONE)) {
+        switch (op & 0xF) {
+            case MPR_OP_EQ:     ret = eq;               break;
+            case MPR_OP_GT:     ret = gt != 0;          break;
+            case MPR_OP_GTE:    ret = (eq + gt) != 0;   break;
+            case MPR_OP_LT:     ret = lt != 0;          break;
+            case MPR_OP_LTE:    ret = (eq + lt) != 0;   break;
+            case MPR_OP_NEQ:    ret = (gt + lt) != 0;   break;
+            case MPR_OP_BAND:   ret = and;              break;
+            case MPR_OP_BOR:    ret = or;               break;
+            default:            ret = 0;                break;
+        }
+        if (op & MPR_OP_NONE)
+            ret = !ret;
     }
+    else {
+        switch (op & 0xF) {
+            case MPR_OP_EQ:     ret = (gt + lt) == 0;   break;
+            case MPR_OP_GT:     ret = (eq + gt) == 0;   break;
+            case MPR_OP_GTE:    ret = lt == 0;          break;
+            case MPR_OP_LT:     ret = (eq + gt) == 0;   break;
+            case MPR_OP_LTE:    ret = gt == 0;          break;
+            case MPR_OP_NEQ:    ret = eq == 0;          break;
+            case MPR_OP_BAND:   ret = and;              break;
+            case MPR_OP_BOR:    ret = or;               break;
+            default:            ret = 0;                break;
+        }
+    }
+    return ret;
 }
 
 static int filter_by_prop(const void *ctx, mpr_obj o)
@@ -535,7 +694,7 @@ static int filter_by_prop(const void *ctx, mpr_obj o)
     const void *val, *_val;
 
     if (MPR_PROP_UNKNOWN == p || MPR_PROP_EXTRA == p)
-        key =  (const char*)((char*)ctx + sizeof(int)*4);
+        key = (const char*)((char*)ctx + sizeof(int)*4);
     offset = sizeof(int) * 4 + (key ? strlen(key) + 1 : 0);
     val = (void*)((char*)ctx + offset);
     if (key && key[0])
@@ -565,9 +724,10 @@ static int filter_by_prop(const void *ctx, mpr_obj o)
         }
         return MPR_OP_NONE == op;
     }
-    else if (_type != type || (op < MPR_OP_ALL && _len != len))
+    else if (   (op < MPR_OP_ALL && _len != len)
+             || (_type != type && (_type > MPR_OBJ || type != MPR_PTR)))
         return 0;
-    return compare_val(op, len, type, _val, val);
+    return compare_val(op, type, _len, len, _val, val);
 }
 
 /* TODO: we need to cache the value to be compared incase is goes out of scope. */
@@ -578,8 +738,10 @@ mpr_list mpr_list_filter(mpr_list list, mpr_prop p, const char *key, int len,
     int i = 0, size, offset = 0, mask = MPR_OP_ALL | MPR_OP_ANY;
     char *data;
 
-    if (!list || !val || len <= 0 || op <= MPR_OP_UNDEFINED || (op | mask) > (MPR_OP_NEQ | mask))
+    if (!list || op <= MPR_OP_UNDEFINED || (op | mask) > (MPR_OP_BOR | mask)
+        || ((!val || len <= 0) && op != MPR_OP_EX && op != MPR_OP_NEX)) {
         return list;
+    }
     if (len > 1) {
         trace("filters with value arrays are not currently supported.\n");
         return list;
@@ -609,7 +771,7 @@ mpr_list mpr_list_filter(mpr_list list, mpr_prop p, const char *key, int len,
     filter = (mpr_list_header_t*)malloc(LIST_HEADER_SIZE);
     filter->next = (void*)mpr_list_query_continuation;
     filter->query_type = QUERY_DYNAMIC;
-    filter->query_ctx = (query_info_t*)malloc(sizeof(query_info_t)+size);
+    filter->query_ctx = (query_info_t*)malloc(sizeof(query_info_t) + size);
 
     data = (char*)&filter->query_ctx->data;
 
@@ -663,6 +825,8 @@ mpr_list mpr_list_filter(mpr_list list, mpr_prop p, const char *key, int len,
     }
 
     filter->query_ctx->size = sizeof(query_info_t) + size;
+    filter->query_ctx->index_offset = -1;
+    filter->query_ctx->reset = 0;
     filter->query_ctx->query_compare = (query_compare_func_t*)filter_by_prop;
     filter->query_ctx->query_free = (query_free_func_t*)free_query_single_ctx;
     filter->start = (void**)list;

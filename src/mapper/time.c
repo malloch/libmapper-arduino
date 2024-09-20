@@ -5,24 +5,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
+
 #ifdef _MSC_VER
 #include "time.h"
 
 #include <Windows.h>
-#include <stdint.h> // portable: uint64_t   MSVC: __int64 
+#include <stdint.h> /* portable: uint64_t   MSVC: __int64 */
 #define HAVE_GETTIMEOFDAY
 
-// MSVC defines this in winsock2.h!?
-//typedef struct timeval {
-//	long tv_sec;
-//	long tv_usec;
-//} timeval;
+/* MSVC defines this in winsock2.h!? */
+/*  typedef struct timeval {
+        long tv_sec;
+        long tv_usec;
+    } timeval;
+ */
 
 int gettimeofday(struct timeval * tp, struct timezone * tzp)
 {
-	// Note: some broken versions only have 8 trailing zero's, the correct epoch has 9 trailing zero's
-	// This magic number is the number of 100 nanosecond intervals since January 1, 1601 (UTC)
-	// until 00:00:00 January 1, 1970 
+	/* Note: some broken versions only have 8 trailing zero's, the correct epoch has 9 trailing
+     * zero's. This magic number is the number of 100 nanosecond intervals since January 1, 1601
+     * (UTC) until 00:00:00 January 1, 1970 */
 	static const uint64_t EPOCH = ((uint64_t)116444736000000000ULL);
 
 	SYSTEMTIME  system_time;
@@ -43,14 +46,12 @@ int gettimeofday(struct timeval * tp, struct timezone * tzp)
 #include <sys/time.h>
 #endif
 
-#include "mapper_internal.h"
-#include "types_internal.h"
 #include <mapper/mapper.h>
 
 static double multiplier = 0.00000000023283064365;
 
 /*! Internal function to get the current time. */
-double mpr_get_current_time()
+double mpr_get_current_time(void)
 {
 #ifdef HAVE_GETTIMEOFDAY
     struct timeval tv;
@@ -144,5 +145,15 @@ void mpr_time_set(mpr_time *l, mpr_time r)
 
 int mpr_time_cmp(mpr_time l, mpr_time r)
 {
-    return l.sec == r.sec ? l.frac - r.frac : l.sec - r.sec;
+    register int res;
+    if (l.sec == r.sec)
+        res = (l.frac > r.frac) - (l.frac < r.frac);
+    else
+        res = (l.sec > r.sec) - (l.sec < r.sec);
+    return res;
+}
+
+void mpr_time_print(mpr_time t)
+{
+    printf("%08x.%08x", t.sec, t.frac);
 }

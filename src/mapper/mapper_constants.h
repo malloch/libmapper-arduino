@@ -5,14 +5,7 @@
 extern "C" {
 #endif
 
-/*! This file defines structs used to return information from the network. */
-
-#include <lo/lo.h>
-
-/*! A 64-bit data structure containing an NTP-compatible time tag, as used by OSC. */
-typedef lo_timetag mpr_time;
-#define MPR_NOW LO_TT_IMMEDIATE
-
+/*! Describes the possible data types used by libmapper. */
 enum {
     MPR_DEV             = 0x01,             /*!< Devices only. */
     MPR_SIG_IN          = 0x02,             /*!< Input signals. */
@@ -35,8 +28,6 @@ enum {
     MPR_PTR             = 'v',  /* 0x76 */  /*!< pointer. */
     MPR_NULL            = 'N'   /* 0x4E */  /*!< NULL value. */
 };
-
-typedef char mpr_type;
 
 /*! Symbolic representation of recognized properties. */
 typedef enum {
@@ -83,9 +74,6 @@ typedef enum {
     MPR_PROP_EXTRA          = 0x2800
 } mpr_prop;
 
-/*! This data structure must be large enough to hold a system pointer or a uin64_t */
-typedef uint64_t mpr_id;
-
 /*! Possible operations for composing queries. */
 typedef enum {
     MPR_OP_UNDEFINED    = 0x00,
@@ -97,6 +85,8 @@ typedef enum {
     MPR_OP_LT           = 0x06, /*!< Property value < query value */
     MPR_OP_LTE          = 0x07, /*!< Property value <= query value */
     MPR_OP_NEQ          = 0x08, /*!< Property value != query value */
+    MPR_OP_BAND         = 0x09, /*!< Property value & query value (bitwise AND) */
+    MPR_OP_BOR          = 0x0A, /*!< Property value | query value (bitwise OR) */
     MPR_OP_ALL          = 0x10, /*!< Applies to all elements of value */
     MPR_OP_ANY          = 0x20, /*!< Applies to any element of value */
     MPR_OP_NONE         = 0x40
@@ -108,10 +98,11 @@ typedef enum {
     MPR_LOC_UNDEFINED   = 0x00, /*!< Not yet defined */
     MPR_LOC_SRC         = 0x01, /*!< Source signal(s) for this map. */
     MPR_LOC_DST         = 0x02, /*!< Destination signal(s) for this map. */
-    MPR_LOC_ANY         = 0x03  /*!< Either source or destination signals. */
+    MPR_LOC_ANY         = 0x03, /*!< Either source or destination signals. */
+    MPR_LOC_BOTH        = 0x07  /*!< Both source and destination signals. */
 } mpr_loc;
 
-/*! Describes the possible network protocol for map communication
+/*! Describes the possible network protocol for map communication.
  *  @ingroup map */
 typedef enum {
     MPR_PROTO_UNDEFINED,        /*!< Not yet defined */
@@ -127,22 +118,11 @@ typedef enum {
     MPR_DIR_IN          = 0x01, /*!< Signal is an input */
     MPR_DIR_OUT         = 0x02, /*!< Signal is an output */
     MPR_DIR_ANY         = 0x03, /*!< Either incoming or outgoing */
-    MPR_DIR_BOTH        = 0x04  /*!< Both directions apply.  Currently signals
+    MPR_DIR_BOTH        = 0x07  /*!< Both directions apply.  Currently signals
                                  *   cannot be both inputs and outputs, so this
                                  *   value is only used for querying device maps
                                  *   that touch only local signals. */
 } mpr_dir;
-
-/*! The set of possible signal events, used to register and inform callbacks.
- *  @ingroup signal */
-typedef enum {
-    MPR_SIG_INST_NEW    = 0x01, /*!< New instance has been created. */
-    MPR_SIG_REL_UPSTRM  = 0x02, /*!< Instance was released upstream. */
-    MPR_SIG_REL_DNSTRM  = 0x04, /*!< Instance was released downstream. */
-    MPR_SIG_INST_OFLW   = 0x08, /*!< No local instances left. */
-    MPR_SIG_UPDATE      = 0x10, /*!< Instance value has been updated. */
-    MPR_SIG_ALL         = 0x1F
-} mpr_sig_evt;
 
 /*! Describes the voice-stealing mode for instances.
  *  @ingroup map */
@@ -152,24 +132,69 @@ typedef enum {
     MPR_STEAL_NEWEST    /*!< Steal the newest instance. */
 } mpr_steal_type;
 
-/*! The set of possible graph events, used to inform callbacks.
- *  @ingroup graph */
-typedef enum {
-    MPR_OBJ_NEW,        /*!< New record has been added to the graph. */
-    MPR_OBJ_MOD,        /*!< The existing record has been modified. */
-    MPR_OBJ_REM,        /*!< The existing record has been removed. */
-    MPR_OBJ_EXP         /*!< The graph has lost contact with the remote entity. */
-} mpr_graph_evt;
+/*! Describes the possible statuses for a libmapper object.
+ *  @ingroup object */
+
+/* Status flag usage      | mpr_obj | mpr_dev | mpr_sig | instance | sig cb  | mpr_map | graph cb |
+ | MPR_STATUS_EXPIRED     |    X    |    X    |    X    |          |         |    X    |    X     |
+ | MPR_STATUS_REL_DNSTRM  |         |         |         |    X     |    X    |         |          |
+ | MPR_STATUS_NEW         |    X    |    X    |    X    |    X     |    X    |    X    |    X     |
+ | MPR_STATUS_MODIFIED    |    X    |    X    |    X    |          |         |    X    |    X     |
+ | MPR_STATUS_RESERVED    |         |         |         |    X     |         |         |          |
+ | MPR_STATUS_STAGED      |         |    X    |         |          |         |    X    |          |
+ | MPR_STATUS_HAS_VALUE   |         |         |    X    |    X     |         |         |          |
+ | MPR_STATUS_ACTIVE      |         |         |         |    X     |         |    X    |          |
+ | MPR_STATUS_OVERFLOW    |         |         |    X    |          |    X    |         |          |
+ | MPR_STATUS_REMOVED     |    X    |    X    |    X    |          |         |    X    |    X     |
+ | MPR_STATUS_REL_UPSTRM  |         |         |         |    X     |    X    |         |          |
+ | MPR_STATUS_READY       |         |    X    |         |          |         |    X    |          |
+ | MPR_STATUS_UPDATE_LOC  |         |         |    X    |    X     |    X    |         |          |
+ | MPR_STATUS_UPDATE_REM  |         |         |    X    |    X     |    X    |         |          |
+*/
 
 typedef enum {
-    MPR_STATUS_UNDEFINED    = 0x00,
-    MPR_STATUS_EXPIRED      = 0x01,
-    MPR_STATUS_STAGED       = 0x02,
-    MPR_STATUS_READY        = 0x3E,
-    MPR_STATUS_ACTIVE       = 0x7E, /* must exclude MPR_STATUS_RESERVED */
-    MPR_STATUS_RESERVED     = 0x80,
-    MPR_STATUS_ALL          = 0xFF
+    MPR_STATUS_UNDEFINED    = 0x0000,
+
+    MPR_STATUS_NEW          = 0x0001,   /*!< New object. */
+    MPR_STATUS_MODIFIED     = 0x0002,   /*!< Existing object has been modified. */
+    MPR_STATUS_REMOVED      = 0x0004,   /*!< Existing object has been removed. */
+    MPR_STATUS_EXPIRED      = 0x0008,   /*!< The graph has lost contact with the remote entity. */
+
+    MPR_STATUS_STAGED       = 0x0010,   /*!< Object has been staged and is waiting. */
+    MPR_STATUS_ACTIVE       = 0x0020,   /*!< Object is active. */
+
+    MPR_STATUS_HAS_VALUE    = 0x0040,   /*!< Signal/instance has a value. */
+    MPR_STATUS_NEW_VALUE    = 0x0080,   /*!< Signal/instance value has changed since last check. */
+
+    MPR_STATUS_UPDATE_LOC   = 0x0100,   /*!< Signal/instance value was updated locally. */
+    MPR_STATUS_UPDATE_REM   = 0x0200,   /*!< Signal/instance value was updated remotely. */
+
+    MPR_STATUS_REL_UPSTRM   = 0x0400,   /*!< Instance was released upstream. */
+    MPR_STATUS_REL_DNSTRM   = 0x0800,   /*!< Signal instance was released downstream. */
+
+    MPR_STATUS_OVERFLOW     = 0x1000,   /*!< No local objects available for activation. */
+
+    MPR_STATUS_ANY          = 0x1FFF
 } mpr_status;
+
+/* deprecated constants */
+/*! The set of possible signal events, used to register and inform callbacks.
+ *  @ingroup signal */
+#define MPR_SIG_INST_NEW    MPR_STATUS_NEW          /*!< New instance has been created. */
+#define MPR_SIG_REL_UPSTRM  MPR_STATUS_REL_UPSTRM   /*!< Instance was released upstream. */
+#define MPR_SIG_REL_DNSTRM  MPR_STATUS_REL_DNSTRM   /*!< Instance was released downstream. */
+#define MPR_SIG_INST_OFLW   MPR_STATUS_OVERFLOW     /*!< No local instances left. */
+#define MPR_SIG_UPDATE      MPR_STATUS_UPDATE_REM   /*!< Instance value has been updated remotely. */
+#define MPR_SIG_ALL         MPR_STATUS_ANY
+#define mpr_sig_evt mpr_status
+
+/*! The set of possible graph events, used to inform callbacks.
+ *  @ingroup graph */
+#define MPR_OBJ_NEW MPR_STATUS_NEW      /*!< New record has been added to the graph. */
+#define MPR_OBJ_MOD MPR_STATUS_MODIFIED /*!< The existing record has been modified. */
+#define MPR_OBJ_REM MPR_STATUS_REMOVED  /*!< The existing record has been removed. */
+#define MPR_OBJ_EXP MPR_STATUS_EXPIRED  /*!< The graph has lost contact with the remote entity. */
+#define mpr_graph_evt mpr_status
 
 #ifdef __cplusplus
 }
